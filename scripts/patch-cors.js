@@ -13,6 +13,14 @@ if (fs.existsSync(targetFile)) {
             "return origin; // Allow all origins to fix Codespaces CORS\n        },"
         );
 
+        // Also trust X-Forwarded-Host so URLs use the correct Codespaces domain instead of localhost:8080
+        if (!content.includes('app.proxy = true;')) {
+            content = content.replace(
+                /const app = new Koa\(\);/,
+                "const app = new Koa();\n    app.proxy = true; // Trust X-Forwarded-Host from Codespaces"
+            );
+        }
+
         fs.writeFileSync(targetFile, content);
         console.log('\x1b[34m[patch-cors]\x1b[0m Successfully patched @vscode/test-web to allow all CORS origins.');
     } else {
