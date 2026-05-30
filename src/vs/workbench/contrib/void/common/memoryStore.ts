@@ -10,7 +10,7 @@ import { createDecorator } from '../../../../platform/instantiation/common/insta
 import { IFileService } from '../../../../platform/files/common/files.js'
 import { IWorkspaceContextService } from '../../../../platform/workspace/common/workspace.js'
 import { VSBuffer } from '../../../../base/common/buffer.js'
-import { AgentTask, MemoryEntry, MemoryEntryType, ProjectMemory } from './agentPipelineTypes.js'
+import { AgentTask, MemoryEntry, ProjectMemory } from './agentPipelineTypes.js'
 
 const MEMORY_DIR = '.void'
 const MEMORY_FILE = 'memory.json'
@@ -43,11 +43,6 @@ function createEmptyMemory(): ProjectMemory {
 		fileIndex: {},
 		lastUpdated: Date.now(),
 	}
-}
-
-// Rough token estimation: ~4 chars per token
-function estimateTokens(text: string): number {
-	return Math.ceil(text.length / 4)
 }
 
 function truncateToTokenBudget(text: string, maxTokens: number): string {

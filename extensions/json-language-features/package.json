@@ -169,8 +169,11 @@
   },
   "dependencies": {
     "@vscode/extension-telemetry": "^0.9.8",
+    "@vscode/l10n": "^0.0.18",
     "request-light": "^0.8.0",
-    "vscode-languageclient": "^10.0.0-next.14"
+    "vscode-json-languageservice": "^5.7.2",
+    "vscode-languageclient": "^10.0.0-next.14",
+    "vscode-languageserver": "^9.0.1"
   },
   "devDependencies": {
     "@types/node": "20.x"
