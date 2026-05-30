@@ -6,7 +6,7 @@
 import { Disposable } from '../../../../base/common/lifecycle.js'
 import { Emitter, Event } from '../../../../base/common/event.js'
 import { registerSingleton, InstantiationType } from '../../../../platform/instantiation/common/extensions.js'
-import { createDecorator } from '../../../../platform/instantiation/common/instantiation.js'
+import { createDecorator, IInstantiationService } from '../../../../platform/instantiation/common/instantiation.js'
 import { ILLMMessageService } from '../common/sendLLMMessageService.js'
 import { IVoidSettingsService } from '../common/voidSettingsService.js'
 import { IConvertToLLMMessageService } from './convertToLLMMessageService.js'
@@ -24,7 +24,7 @@ import {
 } from '../common/agentPromptTemplates.js'
 import { autoSplitOversizedTasks } from '../common/planExportImport.js'
 import { ModelSelection, ProviderName } from '../common/voidSettingsTypes.js'
-import { IChatThreadService } from './chatThreadService.js'
+import type { IChatThreadService } from './chatThreadService.js'
 
 
 // ======================== Service Interface ========================
@@ -67,15 +67,27 @@ class AgentPipelineService extends Disposable implements IAgentPipelineService {
 	private _abortCurrentLLM: (() => void) | null = null
 	private _isPaused = false
 
+	private _chatThreadService: IChatThreadService | null = null
+
 	constructor(
 		@ILLMMessageService private readonly _llmMessageService: ILLMMessageService,
 		@IVoidSettingsService private readonly _settingsService: IVoidSettingsService,
 		@IConvertToLLMMessageService private readonly _convertToLLMMessagesService: IConvertToLLMMessageService,
 		@IDirectoryStrService private readonly _directoryStrService: IDirectoryStrService,
 		@IMemoryStore private readonly _memoryStore: IMemoryStore,
-		@IChatThreadService private readonly _chatThreadService: IChatThreadService,
+		@IInstantiationService private readonly _instantiationService: IInstantiationService,
 	) {
 		super()
+	}
+
+	/** Lazily resolve IChatThreadService to avoid circular dependency at module load time */
+	private _getChatThreadService(): IChatThreadService {
+		if (!this._chatThreadService) {
+			// Dynamic import to break the circular reference
+			const { IChatThreadService } = require('./chatThreadService.js')
+			this._chatThreadService = this._instantiationService.invokeFunction(accessor => accessor.get(IChatThreadService))
+		}
+		return this._chatThreadService!
 	}
 
 	// ======================== State Management ========================
@@ -311,8 +323,9 @@ class AgentPipelineService extends Disposable implements IAgentPipelineService {
 			// Execute the task by sending to the chat thread service as a user message
 			// The task execution goes through the existing agent tool loop
 			try {
-				const threadId = this._chatThreadService.state.currentThreadId
-				await this._chatThreadService.addUserMessageAndStreamResponse({
+				const chatService = this._getChatThreadService()
+				const threadId = chatService.state.currentThreadId
+				await chatService.addUserMessageAndStreamResponse({
 					userMessage: `${TASK_EXECUTION_SYSTEM}\n\n${executionPrompt}`,
 					threadId,
 				})
@@ -363,7 +376,7 @@ class AgentPipelineService extends Disposable implements IAgentPipelineService {
 	private _waitForStreamComplete(threadId: string): Promise<void> {
 		return new Promise<void>((resolve) => {
 			const check = () => {
-				const streamState = this._chatThreadService.streamState[threadId]
+				const streamState = this._getChatThreadService().streamState[threadId]
 				if (!streamState?.isRunning) {
 					resolve()
 					return
