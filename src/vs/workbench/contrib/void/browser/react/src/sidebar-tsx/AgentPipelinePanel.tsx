@@ -8,7 +8,7 @@ import { useState, useEffect, useRef } from 'react';
 import { useAccessor, useAgentPipelineState, useSettingsState } from '../util/services.js'
 import { AgentTask, PipelinePhase, AgentPlan } from '../../../../common/agentPipelineTypes.js'
 import { IconLoading, IconSquare, IconX, IconWarning } from './SidebarChat.js'
-import { ModelDropdown } from '../void-settings-tsx/ModelDropdown.js'
+
 import { validatePlan, importPlanFromAI, formatPlanForExternalAI } from '../../../../common/planExportImport.js'
 import { Check, Copy as CopyIcon, Pencil, Save, Trash2, GripVertical, Plus } from 'lucide-react'
 
@@ -22,7 +22,7 @@ export const AgentPipelinePanel = ({
 	const pipelineService = accessor.get('IAgentPipelineService')
 	const state = useAgentPipelineState()
 
-	if (!state || state.phase === 'idle') return null
+	if (!state || (state.phase === 'idle' && !state.error)) return null
 
 	return (
 		<div className={`flex flex-col gap-2 p-2 border-b border-void-border-2 bg-void-bg-2 ${className}`}>
@@ -48,6 +48,7 @@ export const AgentPipelinePanel = ({
 					plan={state.currentPlan}
 					currentIndex={state.currentTaskIndex}
 					phase={state.phase}
+					executionLog={state.executionLog}
 					onPause={() => pipelineService.pausePipeline()}
 					onResume={() => pipelineService.resumePipeline()}
 					onCancel={() => pipelineService.cancelPipeline()}
@@ -111,6 +112,9 @@ const PlanReviewPanel = ({
 	const [pasteInput, setPasteInput] = useState('')
 	const [pasteError, setPasteError] = useState<string | null>(null)
 
+	const accessor = useAccessor()
+	const clipboardService = accessor.get('IClipboardService')
+
 	const handlePastePlan = () => {
 		const result = importPlanFromAI(pasteInput)
 		if (result.success && result.tasks) {
@@ -125,7 +129,7 @@ const PlanReviewPanel = ({
 
 	const handleCopyForAI = () => {
 		const text = formatPlanForExternalAI(plan)
-		navigator.clipboard.writeText(text)
+		clipboardService.writeText(text)
 	}
 
 	return (
@@ -229,7 +233,7 @@ const TaskEditorList = ({ plan, onUpdate }: { plan: AgentPlan, onUpdate: (p: Age
 	}
 
 	return (
-		<div className="flex flex-col gap-2 overflow-y-auto pr-1">
+		<div className="flex flex-col gap-2 overflow-y-auto pr-1 max-h-[50vh]">
 			{errors.length > 0 && (
 				<div className="text-xs text-void-error bg-void-error/10 p-2 rounded">
 					{errors.map((e: string, i: number) => <div key={i}>• {e}</div>)}
@@ -331,6 +335,7 @@ const TaskExecutionPanel = ({
 	plan,
 	currentIndex,
 	phase,
+	executionLog,
 	onPause,
 	onResume,
 	onCancel
@@ -338,6 +343,7 @@ const TaskExecutionPanel = ({
 	plan: AgentPlan
 	currentIndex: number
 	phase: PipelinePhase
+	executionLog: string
 	onPause: () => void
 	onResume: () => void
 	onCancel: () => void
@@ -371,6 +377,13 @@ const TaskExecutionPanel = ({
 					</div>
 				))}
 			</div>
+
+			{executionLog && (
+				<div className="text-xs font-mono bg-void-bg-1 p-2 rounded border border-void-border-3 
+								max-h-32 overflow-y-auto text-void-fg-3 whitespace-pre-wrap mt-2">
+					{executionLog}
+				</div>
+			)}
 
 			{/* Controls */}
 			<div className="flex justify-end gap-2 mt-1">

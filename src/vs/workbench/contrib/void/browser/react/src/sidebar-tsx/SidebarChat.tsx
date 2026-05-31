@@ -35,6 +35,7 @@ import { ToolApprovalTypeSwitch } from '../void-settings-tsx/Settings.js';
 
 import { removeMCPToolNamePrefix } from '../../../../common/mcpServiceTypes.js';
 import { AgentPipelinePanel } from './AgentPipelinePanel.js';
+import { persistentTerminalNameOfId } from '../../../terminalToolService.js';
 
 
 
@@ -337,6 +338,8 @@ export const VoidChatArea: React.FC<VoidChatAreaProps> = ({
 	featureName,
 	loadingIcon,
 }) => {
+	const settingsState = useSettingsState()
+
 	return (
 		<div
 			ref={divRef}
@@ -389,6 +392,12 @@ export const VoidChatArea: React.FC<VoidChatAreaProps> = ({
 						<div className='flex items-center flex-wrap gap-x-2 gap-y-1 text-nowrap '>
 							{featureName === 'Chat' && <ChatModeDropdown className='text-xs text-void-fg-3 bg-void-bg-1 border border-void-border-2 rounded py-0.5 px-1' />}
 							<ModelDropdown featureName={featureName} className='text-xs text-void-fg-3 bg-void-bg-1 rounded' />
+							{settingsState.globalSettings.agentPipelineEnabled && (
+								<div className="text-[10px] text-green-400 bg-green-500/10 border border-green-500/30 rounded px-1.5 py-0.5 flex items-center gap-1">
+									<div className="w-1.5 h-1.5 rounded-full bg-green-500 animate-pulse" />
+									Agent Pipeline Active
+								</div>
+							)}
 						</div>
 					</div>
 				)}
@@ -2911,35 +2920,61 @@ export const SidebarChat = () => {
 
 	// state of current message
 	const initVal = ''
-	const [instructionsAreEmpty, setInstructionsAreEmpty] = useState(!initVal)
+	const [debugMsg, setDebugMsg] = useState<string>('')
+	
+	useEffect(() => {
+		setDebugMsg('System Diagnostics Active! If you see this, the UI is updated. Try submitting now.')
+	}, [])
 
-	const isDisabled = instructionsAreEmpty || !!isFeatureNameDisabled('Chat', settingsState)
+	const [instructionsAreEmpty, setInstructionsAreEmpty] = useState(!initVal)
+	const inputTextRef = useRef(initVal)
+
+	const isAgentMode = settingsState.globalSettings.agentPipelineEnabled
+	const isDisabled = instructionsAreEmpty || (!isAgentMode && !!isFeatureNameDisabled('Chat', settingsState))
 
 	const sidebarRef = useRef<HTMLDivElement>(null)
 	const scrollContainerRef = useRef<HTMLDivElement | null>(null)
 	const onSubmit = useCallback(async (_forceSubmit?: string) => {
-
-		if (isDisabled && !_forceSubmit) return
-		if (isRunning) return
+		const userMessage = _forceSubmit || inputTextRef.current || ''
+		// BRUTAL DEBUGGING ALERT (RENDERED IN DOM)
+		if (!userMessage.trim()) {
+			setDebugMsg(`Submission Blocked: userMessage is empty! inputTextRef: "${inputTextRef.current}"`);
+			return
+		}
+		if (isDisabled && !_forceSubmit) {
+			setDebugMsg(`Submission Blocked: isDisabled is TRUE! (isAgentMode: ${isAgentMode}, instructionsAreEmpty: ${instructionsAreEmpty})`);
+			return
+		}
+		if (isRunning) {
+			setDebugMsg(`Submission Blocked: isRunning is TRUE!`);
+			return
+		}
+		
+		setDebugMsg(`Passed all checks! Calling startPipeline...`)
 
 		const threadId = chatThreadsService.state.currentThreadId
 
 		const agentPipelineService = accessor.get('IAgentPipelineService')
-		if (settingsState.globalSettings.agentPipelineEnabled && settingsState.globalSettings.chatMode === 'agent') {
+		if (settingsState.globalSettings.agentPipelineEnabled) {
 			try {
 				await agentPipelineService.startPipeline(userMessage)
 			} catch (e) {
+				const errStr = e instanceof Error ? e.message : String(e);
+				setDebugMsg(`Pipeline Crash! ${errStr}`);
 				console.error('Error starting agent pipeline:', e)
 			}
 		} else {
 			try {
 				await chatThreadsService.addUserMessageAndStreamResponse({ userMessage, threadId })
 			} catch (e) {
+				const errStr = e instanceof Error ? e.message : String(e);
+				setDebugMsg(`Chat Crash! ${errStr}`);
 				console.error('Error while sending message in chat:', e)
 			}
 		}
 
 		setSelections([]) // clear staging
+		inputTextRef.current = ''
 		textAreaFnsRef.current?.setValue('')
 		textAreaRef.current?.focus() // focus input after submit
 
@@ -3059,6 +3094,7 @@ export const SidebarChat = () => {
 
 
 	const onChangeText = useCallback((newStr: string) => {
+		inputTextRef.current = newStr
 		setInstructionsAreEmpty(!newStr)
 	}, [setInstructionsAreEmpty])
 	const onKeyDown = useCallback((e: KeyboardEvent<HTMLTextAreaElement>) => {
@@ -3136,6 +3172,16 @@ export const SidebarChat = () => {
 		ref={sidebarRef}
 		className='w-full h-full max-h-full flex flex-col overflow-auto px-4'
 	>
+		{debugMsg && (
+			<div style={{position:'relative',padding:'12px',background:'#dc2626',color:'white',fontFamily:'monospace',fontSize:'11px',zIndex:9999,wordBreak:'break-all',cursor:'pointer',borderBottom:'3px solid #991b1b'}} onClick={() => setDebugMsg('')}>
+				🔴 {debugMsg}
+			</div>
+		)}
+		{settingsState.globalSettings.agentPipelineEnabled && (
+			<ErrorBoundary>
+				<AgentPipelinePanel className="flex-shrink-0" />
+			</ErrorBoundary>
+		)}
 		<ErrorBoundary>
 			{landingPageInput}
 		</ErrorBoundary>
@@ -3171,8 +3217,13 @@ export const SidebarChat = () => {
 		ref={sidebarRef}
 		className='w-full h-full flex flex-col overflow-hidden'
 	>
+		{debugMsg && (
+			<div style={{position:'relative',padding:'12px',background:'#dc2626',color:'white',fontFamily:'monospace',fontSize:'11px',zIndex:9999,wordBreak:'break-all',cursor:'pointer',borderBottom:'3px solid #991b1b'}} onClick={() => setDebugMsg('')}>
+				🔴 {debugMsg}
+			</div>
+		)}
 
-		{settingsState.globalSettings.agentPipelineEnabled && settingsState.globalSettings.chatMode === 'agent' && (
+		{settingsState.globalSettings.agentPipelineEnabled && (
 			<ErrorBoundary>
 				<AgentPipelinePanel className="flex-shrink-0" />
 			</ErrorBoundary>

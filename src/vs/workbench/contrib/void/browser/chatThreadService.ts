@@ -5,7 +5,6 @@
 
 import { Disposable } from '../../../../base/common/lifecycle.js';
 import { registerSingleton, InstantiationType } from '../../../../platform/instantiation/common/extensions.js';
-import { createDecorator } from '../../../../platform/instantiation/common/instantiation.js';
 import { IStorageService, StorageScope, StorageTarget } from '../../../../platform/storage/common/storage.js';
 
 import { URI } from '../../../../base/common/uri.js';
@@ -95,8 +94,6 @@ A checkpoint appears before every LLM message, and before every user message (be
 */
 
 
-type UserMessageType = ChatMessage & { role: 'user' }
-type UserMessageState = UserMessageType['state']
 const defaultMessageState: UserMessageState = {
 	stagingSelections: [],
 	isBeingEdited: false,
@@ -104,51 +101,8 @@ const defaultMessageState: UserMessageState = {
 
 // a 'thread' means a chat message history
 
-type WhenMounted = {
-	textAreaRef: { current: HTMLTextAreaElement | null }; // the textarea that this thread has, gets set in SidebarChat
-	scrollToBottom: () => void;
-}
 
-
-
-export type ThreadType = {
-	id: string; // store the id here too
-	createdAt: string; // ISO string
-	lastModified: string; // ISO string
-
-	messages: ChatMessage[];
-	filesWithUserChanges: Set<string>;
-
-	// this doesn't need to go in a state object, but feels right
-	state: {
-		currCheckpointIdx: number | null; // the latest checkpoint we're at (null if not at a particular checkpoint, like if the chat is streaming, or chat just finished and we haven't clicked on a checkpt)
-
-		stagingSelections: StagingSelectionItem[];
-		focusedMessageIdx: number | undefined; // index of the user message that is being edited (undefined if none)
-
-		linksOfMessageIdx: { // eg. link = linksOfMessageIdx[4]['RangeFunction']
-			[messageIdx: number]: {
-				[codespanName: string]: CodespanLocationLink
-			}
-		}
-
-
-		mountedInfo?: {
-			whenMounted: Promise<WhenMounted>
-			_whenMountedResolver: (res: WhenMounted) => void
-			mountedIsResolvedRef: { current: boolean };
-		}
-
-
-	};
-}
-
-type ChatThreads = {
-	[id: string]: undefined | ThreadType;
-}
-
-
-import { ChatThreads, IChatThreadService, ThreadStreamState, ThreadsState, ThreadType, UserMessageState } from './chatThreadServiceInterface.js';
+import { ChatThreads, IChatThreadService, ThreadStreamState, ThreadsState, ThreadType, UserMessageState, IsRunningType, WhenMounted } from './chatThreadServiceInterface.js';
 
 const newThreadObject = () => {
 	const now = new Date().toISOString()

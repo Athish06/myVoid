@@ -6,7 +6,7 @@
 import { Event } from '../../../../base/common/event.js';
 import { URI } from '../../../../base/common/uri.js';
 import { createDecorator } from '../../../../platform/instantiation/common/instantiation.js';
-import { ChatMessage, CodespanLocationLink, StagingSelectionItem, ToolMessage } from '../common/chatThreadServiceTypes.js';
+import { ChatMessage, CodespanLocationLink, StagingSelectionItem } from '../common/chatThreadServiceTypes.js';
 import { RawToolCallObj, RawToolParamsObj } from '../common/sendLLMMessageTypes.js';
 import { ToolCallParams, ToolName } from '../common/toolsServiceTypes.js';
 

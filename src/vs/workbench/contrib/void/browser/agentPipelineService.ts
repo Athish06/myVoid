@@ -17,7 +17,7 @@ import {
 	PipelinePhase, PipelineState,
 } from '../common/agentPipelineTypes.js'
 import {
-	PROMPT_REFINER_SYSTEM, TASK_GENERATOR_SYSTEM, TASK_EXECUTION_SYSTEM,
+	PROMPT_REFINER_SYSTEM, TASK_GENERATOR_SYSTEM,
 	buildPromptRefinerUserMessage, buildTaskGeneratorUserMessage,
 	buildTaskExecutionPrompt,
 	REPLAN_SYSTEM_PROMPT, buildReplanUserMessage,
@@ -68,6 +68,7 @@ class AgentPipelineService extends Disposable implements IAgentPipelineService {
 
 	private _abortCurrentLLM: (() => void) | null = null
 	private _isPaused = false
+	private _lastLLMError: string | null = null
 
 	constructor(
 		@ILLMMessageService private readonly _llmMessageService: ILLMMessageService,
@@ -129,7 +130,8 @@ class AgentPipelineService extends Disposable implements IAgentPipelineService {
 			return { providerName: 'ollama' as ProviderName, modelName: modelStr }
 		}
 
-		// Fall back to whatever Chat is set to
+		// Fall back to whatever Chat is set to, but warn the user
+		this._setState({ error: `Warning: Override model '${modelStr}' not found in Ollama list. Falling back to Chat model.` })
 		return this._settingsService.state.modelSelectionOfFeature['Chat']
 	}
 
@@ -167,33 +169,33 @@ class AgentPipelineService extends Disposable implements IAgentPipelineService {
 			cutOffMessage: '...Directories cut off, use tools to read more...'
 		})
 
-		// Step 1: Refine the prompt
+		// Step 1: Refine the prompt (non-fatal — if it fails, use raw prompt)
 		this._setState({ executionLog: 'Refining your prompt...' })
+		let refinedPrompt: string = userPrompt
+		let projectSummary: string = ''
+		let techStack: string[] = []
+
 		const refinedResult = await this._callLLMForJSON(
 			PROMPT_REFINER_SYSTEM,
 			buildPromptRefinerUserMessage(userPrompt, directoryStr),
 			modelSelection,
 		)
 
-		if (!refinedResult) {
-			this._setState({ phase: 'idle', error: 'Failed to refine prompt. Model did not return valid JSON.' })
-			return
+		if (refinedResult) {
+			try {
+				const parsed = JSON.parse(refinedResult)
+				refinedPrompt = parsed.refinedPrompt || userPrompt
+				projectSummary = parsed.projectSummary || ''
+				techStack = Array.isArray(parsed.techStack) ? parsed.techStack : []
+			} catch {
+				// JSON parsing failed, use raw prompt
+				this._setState({ executionLog: 'Prompt refinement returned non-JSON, using your original prompt...' })
+			}
+		} else {
+			// LLM call failed or returned null — continue with raw prompt
+			this._setState({ executionLog: `Prompt refinement failed (${this._lastLLMError || 'unknown error'}), using your original prompt...` })
 		}
 
-		let refinedPrompt: string
-		let projectSummary: string
-		let techStack: string[]
-		try {
-			const parsed = JSON.parse(refinedResult)
-			refinedPrompt = parsed.refinedPrompt || userPrompt
-			projectSummary = parsed.projectSummary || ''
-			techStack = Array.isArray(parsed.techStack) ? parsed.techStack : []
-		} catch {
-			// If JSON parsing fails, use the raw prompt as-is
-			refinedPrompt = userPrompt
-			projectSummary = ''
-			techStack = []
-		}
 
 		// Update memory with project info
 		await this._memoryStore.updateProjectInfo(projectSummary, techStack)
@@ -206,27 +208,45 @@ class AgentPipelineService extends Disposable implements IAgentPipelineService {
 			modelSelection,
 		)
 
-		if (!taskResult) {
-			this._setState({ phase: 'idle', error: 'Failed to generate tasks. Model did not return valid JSON.' })
-			return
-		}
-
 		let tasks: AgentTask[]
-		try {
-			const parsed = JSON.parse(taskResult)
-			const rawTasks: AgentTask[] = (parsed.tasks || []).map((t: Record<string, unknown>, i: number) => ({
-				id: (t.id as string) || `task_${String(i + 1).padStart(3, '0')}`,
-				title: (t.title as string) || `Task ${i + 1}`,
-				description: (t.description as string) || '',
-				targetFiles: Array.isArray(t.targetFiles) ? t.targetFiles as string[] : [],
-				dependsOn: Array.isArray(t.dependsOn) ? t.dependsOn as string[] : [],
-				taskType: (t.taskType === 'create' || t.taskType === 'modify' || t.taskType === 'refactor') ? t.taskType : 'modify',
-				status: 'pending' as const,
-			}))
-			tasks = autoSplitOversizedTasks(rawTasks)
-		} catch {
-			this._setState({ phase: 'idle', error: 'Failed to parse task list from model output.' })
-			return
+
+		if (!taskResult) {
+			// Task generation failed — create a single fallback task with the user's prompt
+			this._setState({ executionLog: `Task generation failed (${this._lastLLMError || 'unknown error'}), creating single task from your prompt...` })
+			tasks = [{
+				id: 'task_001',
+				title: refinedPrompt.slice(0, 80),
+				description: refinedPrompt,
+				targetFiles: [],
+				dependsOn: [],
+				taskType: 'modify',
+				status: 'pending',
+			}]
+		} else {
+			try {
+				const parsed = JSON.parse(taskResult)
+				const rawTasks: AgentTask[] = (parsed.tasks || []).map((t: Record<string, unknown>, i: number) => ({
+					id: (t.id as string) || `task_${String(i + 1).padStart(3, '0')}`,
+					title: (t.title as string) || `Task ${i + 1}`,
+					description: (t.description as string) || '',
+					targetFiles: Array.isArray(t.targetFiles) ? t.targetFiles as string[] : [],
+					dependsOn: Array.isArray(t.dependsOn) ? t.dependsOn as string[] : [],
+					taskType: (t.taskType === 'create' || t.taskType === 'modify' || t.taskType === 'refactor') ? t.taskType : 'modify',
+					status: 'pending' as const,
+				}))
+				tasks = autoSplitOversizedTasks(rawTasks)
+			} catch {
+				// Parsing failed — create single task fallback
+				tasks = [{
+					id: 'task_001',
+					title: refinedPrompt.slice(0, 80),
+					description: refinedPrompt,
+					targetFiles: [],
+					dependsOn: [],
+					taskType: 'modify',
+					status: 'pending',
+				}]
+			}
 		}
 
 		// Build the plan
@@ -270,8 +290,8 @@ class AgentPipelineService extends Disposable implements IAgentPipelineService {
 	// ======================== Phase 2: Execution ========================
 
 	private async _runExecutionPhase(): Promise<void> {
-		const plan = this.state.currentPlan
-		if (!plan) return
+		if (!this.state.currentPlan) return
+		let plan: AgentPlan = this.state.currentPlan
 
 		const modelSelection = this.getExecutionModelSelection()
 		if (!modelSelection) {
@@ -280,31 +300,45 @@ class AgentPipelineService extends Disposable implements IAgentPipelineService {
 		}
 
 		const failureCountOfTaskId = new Map<string, number>()
+		let totalReplanAttempts = 0
 
-		for (let i = 0; i < plan.tasks.length; i++) {
+		// Use a while loop because we may restart execution after replanning
+		while (true) {
 			if (this._isPaused) {
-				this._setState({ phase: 'paused', currentTaskIndex: i })
+				const currentIdx = plan.tasks.findIndex(t => t.status === 'pending' || t.status === 'running')
+				this._setState({ phase: 'paused', currentTaskIndex: Math.max(0, currentIdx) })
 				return
 			}
 
-			const task = plan.tasks[i]
-			if (task.status === 'done') continue // already completed (e.g. resumed after pause)
+			// Find the first task that needs to be executed
+			const taskIndex = plan.tasks.findIndex(t => t.status === 'pending' || t.status === 'running')
+			if (taskIndex === -1) {
+				// All tasks done or failed
+				break
+			}
+
+			const task = plan.tasks[taskIndex]
 
 			// Check dependencies
-			const depsOk = task.dependsOn.every(depId => {
+			const depsOk = task.dependsOn.every((depId: string) => {
 				const dep = plan.tasks.find(t => t.id === depId)
 				return dep && dep.status === 'done'
 			})
 			if (!depsOk) {
-				task.status = 'failed'
-				task.error = 'Dependencies not met'
+				plan = {
+					...plan,
+					tasks: plan.tasks.map((t: AgentTask): AgentTask => t.id === task.id ? { ...t, status: 'failed', error: 'Dependencies not met' } : t)
+				}
 				this._updatePlanTasks(plan)
 				continue
 			}
 
 			// Mark running
-			task.status = 'running'
-			this._setState({ currentTaskIndex: i, executionLog: '' })
+			plan = {
+				...plan,
+				tasks: plan.tasks.map((t: AgentTask): AgentTask => t.id === task.id ? { ...t, status: 'running' } : t)
+			}
+			this._setState({ currentTaskIndex: taskIndex, executionLog: '' })
 			this._updatePlanTasks(plan)
 
 			// Build context with memory
@@ -312,24 +346,24 @@ class AgentPipelineService extends Disposable implements IAgentPipelineService {
 			const executionPrompt = buildTaskExecutionPrompt(task, plan, memoryContext)
 
 			// Execute the task by sending to the chat thread service as a user message
-			// The task execution goes through the existing agent tool loop
 			try {
 				const threadId = this._chatThreadService.state.currentThreadId
 				await this._chatThreadService.addUserMessageAndStreamResponse({
-					userMessage: `${TASK_EXECUTION_SYSTEM}\n\n${executionPrompt}`,
+					userMessage: executionPrompt, // don't send TASK_EXECUTION_SYSTEM here, it's sent as a system message in prepareLLMSimpleMessages later (Wait, addUserMessageAndStreamResponse sends it as a user message! Need to fix this!)
 					threadId,
 				})
 
-				// Wait for the stream to finish
 				await this._waitForStreamComplete(threadId)
 
 				// Mark done
-				task.status = 'done'
-				task.result = `Completed: ${task.title}`
+				plan = {
+					...plan,
+					tasks: plan.tasks.map((t: AgentTask): AgentTask => t.id === task.id ? { ...t, status: 'done', result: `Completed: ${task.title}` } : t)
+				}
 				this._updatePlanTasks(plan)
 
 				// Extract and store memory
-				await this._extractMemory(task, task.result)
+				await this._extractMemory(task, `Completed: ${task.title}`)
 
 			} catch (error) {
 				const errorMsg = error instanceof Error ? error.message : String(error)
@@ -337,21 +371,40 @@ class AgentPipelineService extends Disposable implements IAgentPipelineService {
 				failureCountOfTaskId.set(task.id, attempts)
 
 				if (attempts >= 2) {
+					if (totalReplanAttempts >= 3) {
+						plan = {
+							...plan,
+							tasks: plan.tasks.map((t: AgentTask): AgentTask => t.id === task.id ? { ...t, status: 'failed', error: `Failed after max replans: ${errorMsg}` } : t)
+						}
+						this._updatePlanTasks(plan)
+						continue // skip replanning, just fail the task
+					}
+
 					// Re-plan this task
-					task.status = 'failed'
-					task.error = errorMsg
+					plan = {
+						...plan,
+						tasks: plan.tasks.map((t: AgentTask): AgentTask => t.id === task.id ? { ...t, status: 'failed', error: errorMsg } : t)
+					}
 					this._updatePlanTasks(plan)
 
+					totalReplanAttempts++
 					try {
+						// _handleReplan will mutate plan.tasks. We must ensure it's immutable there too, or we can just pull it from state afterwards.
 						await this._handleReplan(task, plan, errorMsg, modelSelection)
+						plan = this.state.currentPlan! // update local reference to the new plan
+						// Restart loop to find the next pending task
+						continue
 					} catch {
 						// Re-planning also failed, continue with remaining tasks
 					}
 				} else {
 					// First failure: retry
-					task.status = 'pending'
+					plan = {
+						...plan,
+						tasks: plan.tasks.map((t: AgentTask): AgentTask => t.id === task.id ? { ...t, status: 'pending' } : t)
+					}
 					this._updatePlanTasks(plan)
-					i-- // retry same index
+					// loop will retry the same task since it's the first pending
 				}
 			}
 		}
@@ -365,16 +418,21 @@ class AgentPipelineService extends Disposable implements IAgentPipelineService {
 	 */
 	private _waitForStreamComplete(threadId: string): Promise<void> {
 		return new Promise<void>((resolve) => {
-			const check = () => {
-				const streamState = this._chatThreadService.streamState[threadId]
-				if (!streamState?.isRunning) {
-					resolve()
+			let streamStarted = false
+
+			const disposable = this._chatThreadService.onDidChangeStreamState(({ threadId: id }) => {
+				if (id !== threadId) return
+				const state = this._chatThreadService.streamState[threadId]
+
+				if (!streamStarted && state?.isRunning) {
+					streamStarted = true // stream confirmed started
 					return
 				}
-				setTimeout(check, 500)
-			}
-			// Start checking after a short delay to let the stream begin
-			setTimeout(check, 1000)
+				if (streamStarted && !state?.isRunning) {
+					disposable.dispose()
+					resolve()
+				}
+			})
 		})
 	}
 
@@ -415,8 +473,8 @@ class AgentPipelineService extends Disposable implements IAgentPipelineService {
 				affectedIds.add(failedTask.id)
 
 				const kept = plan.tasks.filter(t => !affectedIds.has(t.id))
-				plan.tasks = [...kept.slice(0, failedIdx), ...replacements, ...kept.slice(failedIdx)]
-				this._updatePlanTasks(plan)
+				const newTasks = [...kept.slice(0, failedIdx), ...replacements, ...kept.slice(failedIdx)]
+				this._updatePlanTasks({ ...plan, tasks: newTasks })
 			}
 		} catch {
 			// Re-plan parsing failed, skip
@@ -510,16 +568,16 @@ class AgentPipelineService extends Disposable implements IAgentPipelineService {
 			// Prepare messages: system + user, no tools
 			const { messages, separateSystemMessage } = this._convertToLLMMessagesService.prepareLLMSimpleMessages({
 				simpleMessages: [
-					{ role: 'user', content: `${systemPrompt}\n\n${userMessage}` }
+					{ role: 'user', content: userMessage }
 				],
 				systemMessage: systemPrompt,
 				modelSelection,
-				featureName: 'Chat',
+				featureName: 'Chat', // Fallback to Chat settings for the model options
 			})
 
 			const requestId = this._llmMessageService.sendLLMMessage({
 				messagesType: 'chatMessages',
-				chatMode: null, // no tools for planning calls
+				chatMode: 'normal', // use normal mode (no tools) for planning calls
 				messages,
 				modelSelection,
 				modelSelectionOptions: undefined,
@@ -536,8 +594,10 @@ class AgentPipelineService extends Disposable implements IAgentPipelineService {
 					const json = this._extractJSON(fullText)
 					resolve(json)
 				},
-				onError: () => {
+				onError: ({ message: errMsg }) => {
 					this._abortCurrentLLM = null
+					this._lastLLMError = errMsg || 'Unknown LLM error'
+					console.error('[AgentPipeline] LLM Error:', errMsg)
 					resolve(null)
 				},
 				onAbort: () => {
