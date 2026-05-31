@@ -7,7 +7,6 @@ import { Disposable } from '../../../../base/common/lifecycle.js'
 import { Emitter, Event } from '../../../../base/common/event.js'
 import { registerSingleton, InstantiationType } from '../../../../platform/instantiation/common/extensions.js'
 import { createDecorator } from '../../../../platform/instantiation/common/instantiation.js'
-import { IWorkspaceContextService } from '../../../../platform/workspace/common/workspace.js'
 import { ILLMMessageService } from '../common/sendLLMMessageService.js'
 import { IVoidSettingsService } from '../common/voidSettingsService.js'
 import { IConvertToLLMMessageService } from './convertToLLMMessageService.js'
@@ -22,12 +21,12 @@ import {
 	buildPromptRefinerUserMessage, buildTaskGeneratorUserMessage,
 	buildTaskExecutionPrompt,
 	REPLAN_SYSTEM_PROMPT, buildReplanUserMessage,
-	MEMORY_EXTRACTION_SYSTEM, buildMemoryExtractionUserMessage,
+	
 } from '../common/agentPromptTemplates.js'
 import { autoSplitOversizedTasks } from '../common/planExportImport.js'
 import { ModelSelection, ProviderName } from '../common/voidSettingsTypes.js'
-import { MemoryEntryType } from '../common/agentPipelineTypes.js'
-import { IChatThreadService } from './chatThreadService.js'
+
+import { IChatThreadService } from './chatThreadServiceInterface.js'
 
 
 // ======================== Service Interface ========================
@@ -75,7 +74,7 @@ class AgentPipelineService extends Disposable implements IAgentPipelineService {
 		@IVoidSettingsService private readonly _settingsService: IVoidSettingsService,
 		@IConvertToLLMMessageService private readonly _convertToLLMMessagesService: IConvertToLLMMessageService,
 		@IDirectoryStrService private readonly _directoryStrService: IDirectoryStrService,
-		@IWorkspaceContextService private readonly _workspaceContextService: IWorkspaceContextService,
+		
 		@IMemoryStore private readonly _memoryStore: IMemoryStore,
 		@IChatThreadService private readonly _chatThreadService: IChatThreadService,
 	) {

@@ -13,6 +13,7 @@ import './sidebarPane.js'
 
 // register quick edit (Ctrl+K)
 import './quickEditActions.js'
+import './voidCommandBarService.js'
 
 
 // register Autocomplete

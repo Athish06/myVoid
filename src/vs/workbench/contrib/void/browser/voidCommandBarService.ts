@@ -31,41 +31,7 @@ import { IVoidModelService } from '../common/voidModelService.js';
 
 
 
-export interface IVoidCommandBarService {
-	readonly _serviceBrand: undefined;
-	stateOfURI: { [uri: string]: CommandBarStateType };
-	sortedURIs: URI[];
-	activeURI: URI | null;
-
-	onDidChangeState: Event<{ uri: URI }>;
-	onDidChangeActiveURI: Event<{ uri: URI | null }>;
-
-	getStreamState: (uri: URI) => 'streaming' | 'idle-has-changes' | 'idle-no-changes';
-	setDiffIdx(uri: URI, newIdx: number | null): void;
-
-	getNextDiffIdx(step: 1 | -1): number | null;
-	getNextUriIdx(step: 1 | -1): number | null;
-	goToDiffIdx(idx: number | null): void;
-	goToURIIdx(idx: number | null): Promise<void>;
-
-	acceptOrRejectAllFiles(opts: { behavior: 'reject' | 'accept' }): void;
-	anyFileIsStreaming(): boolean;
-
-}
-
-
-export const IVoidCommandBarService = createDecorator<IVoidCommandBarService>('VoidCommandBarService');
-
-
-export type CommandBarStateType = undefined | {
-	sortedDiffZoneIds: string[]; // sorted by line number
-	sortedDiffIds: string[]; // sorted by line number (computed)
-	isStreaming: boolean; // is any diffZone streaming in this URI
-
-	diffIdx: number | null; // must refresh whenever sortedDiffIds does so it's valid
-}
-
-
+import { CommandBarStateType, IVoidCommandBarService } from './voidCommandBarServiceInterface.js';
 
 const defaultState: NonNullable<CommandBarStateType> = {
 	sortedDiffZoneIds: [],
