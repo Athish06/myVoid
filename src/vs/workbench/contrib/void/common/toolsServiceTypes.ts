@@ -19,7 +19,8 @@ export type ShallowDirectoryItem = {
 
 
 export const approvalTypeOfBuiltinToolName: Partial<{ [T in BuiltinToolName]?: 'edits' | 'terminal' | 'MCP tools' }> = {
-	'create_file_or_folder': 'edits',
+	'create_file': 'edits',
+	'create_folder': 'edits',
 	'delete_file_or_folder': 'edits',
 	'rewrite_file': 'edits',
 	'edit_file': 'edits',
@@ -53,7 +54,8 @@ export type BuiltinToolCallParams = {
 	// ---
 	'rewrite_file': { uri: URI, newContent: string },
 	'edit_file': { uri: URI, searchReplaceBlocks: string },
-	'create_file_or_folder': { uri: URI, isFolder: boolean },
+	'create_file': { uri: URI },
+	'create_folder': { uri: URI },
 	'delete_file_or_folder': { uri: URI, isRecursive: boolean, isFolder: boolean },
 	// ---
 	'run_command': { command: string; cwd: string | null, terminalId: string },
@@ -74,7 +76,8 @@ export type BuiltinToolResultType = {
 	// ---
 	'rewrite_file': Promise<{ lintErrors: LintErrorItem[] | null }>,
 	'edit_file': Promise<{ lintErrors: LintErrorItem[] | null }>,
-	'create_file_or_folder': {},
+	'create_file': {},
+	'create_folder': {},
 	'delete_file_or_folder': {},
 	// ---
 	'run_command': { result: string; resolveReason: TerminalResolveReason; },

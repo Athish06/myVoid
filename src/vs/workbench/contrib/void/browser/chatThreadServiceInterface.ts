@@ -9,6 +9,7 @@ import { createDecorator } from '../../../../platform/instantiation/common/insta
 import { ChatMessage, CodespanLocationLink, StagingSelectionItem } from '../common/chatThreadServiceTypes.js';
 import { RawToolCallObj, RawToolParamsObj } from '../common/sendLLMMessageTypes.js';
 import { ToolCallParams, ToolName } from '../common/toolsServiceTypes.js';
+import { ChatMode } from '../common/voidSettingsTypes.js';
 
 export type UserMessageType = ChatMessage & { role: 'user' }
 export type UserMessageState = UserMessageType['state']
@@ -129,6 +130,10 @@ export interface IChatThreadService {
 	// these all apply to current thread
 	getCurrentMessageState: (messageIdx: number) => UserMessageState
 	setCurrentMessageState: (messageIdx: number, newState: Partial<UserMessageState>) => void
+
+	// Pipeline overrides
+	setPipelineAutoApprove(active: boolean): void;
+	setChatModeOverride(mode: ChatMode | null): void;
 	getCurrentThreadState: () => ThreadType['state']
 	setCurrentThreadState: (newState: Partial<ThreadType['state']>) => void
 
@@ -162,6 +167,9 @@ export interface IChatThreadService {
 
 	// call to add a message
 	addUserMessageAndStreamResponse({ userMessage, threadId }: { userMessage: string, threadId: string }): Promise<void>;
+
+	// call to add a pipeline user message without streaming
+	addPipelineUserMessage(threadId: string, userMessage: string): Promise<string>;
 
 	// approve/reject
 	approveLatestToolRequest(threadId: string): void;

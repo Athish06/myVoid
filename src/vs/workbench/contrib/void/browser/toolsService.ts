@@ -39,37 +39,42 @@ const validateStr = (argName: string, value: unknown) => {
 
 
 // We are NOT checking to make sure in workspace
-const validateURI = (uriStr: unknown) => {
+const validateURI = (uriStr: unknown, workspaceContextService: IWorkspaceContextService) => {
 	if (uriStr === null) throw new Error(`Invalid LLM output: uri was null.`)
 	if (typeof uriStr !== 'string') throw new Error(`Invalid LLM output format: Provided uri must be a string, but it's a(n) ${typeof uriStr}. Full value: ${JSON.stringify(uriStr)}.`)
 
 	// Check if it's already a full URI with scheme (e.g., vscode-remote://, file://, etc.)
-	// Look for :// pattern which indicates a scheme is present
-	// Examples of supported URIs:
-	// - vscode-remote://wsl+Ubuntu/home/user/file.txt (WSL)
-	// - vscode-remote://ssh-remote+myserver/home/user/file.txt (SSH)
-	// - file:///home/user/file.txt (local file with scheme)
-	// - /home/user/file.txt (local file path, will be converted to file://)
-	// - C:\Users\file.txt (Windows local path, will be converted to file://)
 	if (uriStr.includes('://')) {
 		try {
-			const uri = URI.parse(uriStr)
-			return uri
+			return URI.parse(uriStr)
 		} catch (e) {
-			// If parsing fails, it's a malformed URI
 			throw new Error(`Invalid URI format: ${uriStr}. Error: ${e}`)
 		}
-	} else {
-		// No scheme present, treat as file path
-		// This handles regular file paths like /home/user/file.txt or C:\Users\file.txt
-		const uri = URI.file(uriStr)
-		return uri
 	}
+
+	const folders = workspaceContextService.getWorkspace().folders;
+	if (folders.length > 0) {
+		const workspaceRoot = folders[0].uri;
+		const fsPath = workspaceRoot.fsPath;
+		
+		// If the LLM already provided the full absolute path
+		if (uriStr.startsWith(fsPath) || uriStr.replace(/\\/g, '/').startsWith(fsPath.replace(/\\/g, '/'))) {
+			return URI.file(uriStr);
+		}
+		
+		// Otherwise, treat it as relative to the workspace root
+		// Remove leading slashes so joinPath works correctly as a relative append
+		const cleanUriStr = uriStr.replace(/^[\\/]+/, '');
+		return URI.joinPath(workspaceRoot, cleanUriStr);
+	}
+	
+	// Fallback if no workspace is open
+	return URI.file(uriStr)
 }
 
-const validateOptionalURI = (uriStr: unknown) => {
+const validateOptionalURI = (uriStr: unknown, workspaceContextService: IWorkspaceContextService) => {
 	if (isFalsy(uriStr)) return null
-	return validateURI(uriStr)
+	return validateURI(uriStr, workspaceContextService)
 }
 
 const validateOptionalStr = (argName: string, str: unknown) => {
@@ -143,7 +148,7 @@ export class ToolsService implements IToolsService {
 
 	constructor(
 		@IFileService fileService: IFileService,
-		@IWorkspaceContextService workspaceContextService: IWorkspaceContextService,
+		@IWorkspaceContextService private readonly workspaceContextService: IWorkspaceContextService,
 		@ISearchService searchService: ISearchService,
 		@IInstantiationService instantiationService: IInstantiationService,
 		@IVoidModelService voidModelService: IVoidModelService,
@@ -159,7 +164,7 @@ export class ToolsService implements IToolsService {
 		this.validateParams = {
 			read_file: (params: RawToolParamsObj) => {
 				const { uri: uriStr, start_line: startLineUnknown, end_line: endLineUnknown, page_number: pageNumberUnknown } = params
-				const uri = validateURI(uriStr)
+				const uri = validateURI(uriStr, this.workspaceContextService)
 				const pageNumber = validatePageNum(pageNumberUnknown)
 
 				let startLine = validateNumber(startLineUnknown, { default: null })
@@ -173,13 +178,13 @@ export class ToolsService implements IToolsService {
 			ls_dir: (params: RawToolParamsObj) => {
 				const { uri: uriStr, page_number: pageNumberUnknown } = params
 
-				const uri = validateURI(uriStr)
+				const uri = validateURI(uriStr, this.workspaceContextService)
 				const pageNumber = validatePageNum(pageNumberUnknown)
 				return { uri, pageNumber }
 			},
 			get_dir_tree: (params: RawToolParamsObj) => {
 				const { uri: uriStr, } = params
-				const uri = validateURI(uriStr)
+				const uri = validateURI(uriStr, this.workspaceContextService)
 				return { uri }
 			},
 			search_pathnames_only: (params: RawToolParamsObj) => {
@@ -205,7 +210,7 @@ export class ToolsService implements IToolsService {
 				} = params
 				const queryStr = validateStr('query', queryUnknown)
 				const pageNumber = validatePageNum(pageNumberUnknown)
-				const searchInFolder = validateOptionalURI(searchInFolderUnknown)
+				const searchInFolder = validateOptionalURI(searchInFolderUnknown, this.workspaceContextService)
 				const isRegex = validateBoolean(isRegexUnknown, { default: false })
 				return {
 					query: queryStr,
@@ -216,7 +221,7 @@ export class ToolsService implements IToolsService {
 			},
 			search_in_file: (params: RawToolParamsObj) => {
 				const { uri: uriStr, query: queryUnknown, is_regex: isRegexUnknown } = params;
-				const uri = validateURI(uriStr);
+				const uri = validateURI(uriStr, this.workspaceContextService);
 				const query = validateStr('query', queryUnknown);
 				const isRegex = validateBoolean(isRegexUnknown, { default: false });
 				return { uri, query, isRegex };
@@ -226,23 +231,27 @@ export class ToolsService implements IToolsService {
 				const {
 					uri: uriUnknown,
 				} = params
-				const uri = validateURI(uriUnknown)
+				const uri = validateURI(uriUnknown, this.workspaceContextService)
 				return { uri }
 			},
 
 			// ---
 
-			create_file_or_folder: (params: RawToolParamsObj) => {
+			create_file: (params: RawToolParamsObj) => {
 				const { uri: uriUnknown } = params
-				const uri = validateURI(uriUnknown)
-				const uriStr = validateStr('uri', uriUnknown)
-				const isFolder = checkIfIsFolder(uriStr)
-				return { uri, isFolder }
+				const uri = validateURI(uriUnknown, this.workspaceContextService)
+				return { uri }
+			},
+
+			create_folder: (params: RawToolParamsObj) => {
+				const { uri: uriUnknown } = params
+				const uri = validateURI(uriUnknown, this.workspaceContextService)
+				return { uri }
 			},
 
 			delete_file_or_folder: (params: RawToolParamsObj) => {
 				const { uri: uriUnknown, is_recursive: isRecursiveUnknown } = params
-				const uri = validateURI(uriUnknown)
+				const uri = validateURI(uriUnknown, this.workspaceContextService)
 				const isRecursive = validateBoolean(isRecursiveUnknown, { default: false })
 				const uriStr = validateStr('uri', uriUnknown)
 				const isFolder = checkIfIsFolder(uriStr)
@@ -251,14 +260,14 @@ export class ToolsService implements IToolsService {
 
 			rewrite_file: (params: RawToolParamsObj) => {
 				const { uri: uriStr, new_content: newContentUnknown } = params
-				const uri = validateURI(uriStr)
+				const uri = validateURI(uriStr, this.workspaceContextService)
 				const newContent = validateStr('newContent', newContentUnknown)
 				return { uri, newContent }
 			},
 
 			edit_file: (params: RawToolParamsObj) => {
 				const { uri: uriStr, search_replace_blocks: searchReplaceBlocksUnknown } = params
-				const uri = validateURI(uriStr)
+				const uri = validateURI(uriStr, this.workspaceContextService)
 				const searchReplaceBlocks = validateStr('searchReplaceBlocks', searchReplaceBlocksUnknown)
 				return { uri, searchReplaceBlocks }
 			},
@@ -396,12 +405,13 @@ export class ToolsService implements IToolsService {
 
 			// ---
 
-			create_file_or_folder: async ({ uri, isFolder }) => {
-				if (isFolder)
-					await fileService.createFolder(uri)
-				else {
-					await fileService.createFile(uri)
-				}
+			create_file: async ({ uri }) => {
+				await fileService.createFile(uri)
+				return { result: {} }
+			},
+
+			create_folder: async ({ uri }) => {
+				await fileService.createFolder(uri)
 				return { result: {} }
 			},
 
@@ -411,6 +421,10 @@ export class ToolsService implements IToolsService {
 			},
 
 			rewrite_file: async ({ uri, newContent }) => {
+				const exists = await fileService.exists(uri)
+				if (!exists) {
+					throw new Error(`File does not exist: ${uri.fsPath}. You must use the create_file tool before rewriting it.`)
+				}
 				await voidModelService.initializeModel(uri)
 				if (this.commandBarService.getStreamState(uri) === 'streaming') {
 					throw new Error(`Another LLM is currently making changes to this file. Please stop streaming for now and ask the user to resume later.`)
@@ -427,6 +441,10 @@ export class ToolsService implements IToolsService {
 			},
 
 			edit_file: async ({ uri, searchReplaceBlocks }) => {
+				const exists = await fileService.exists(uri)
+				if (!exists) {
+					throw new Error(`File does not exist: ${uri.fsPath}. You must use the create_file tool first.`)
+				}
 				await voidModelService.initializeModel(uri)
 				if (this.commandBarService.getStreamState(uri) === 'streaming') {
 					throw new Error(`Another LLM is currently making changes to this file. Please stop streaming for now and ask the user to resume later.`)
@@ -444,7 +462,13 @@ export class ToolsService implements IToolsService {
 				return { result: lintErrorsPromise }
 			},
 			// ---
-			run_command: async ({ command, cwd, terminalId }) => {
+			run_command: async ({ command, cwd, terminalId, ...rest }: any) => {
+				if (rest.arguments) {
+					command = `${command} ${rest.arguments}`
+				}
+				if (command.trim().startsWith('cd ')) {
+					throw new Error(`Standalone 'cd' commands have no effect. Please execute your actual command and use the 'cwd' parameter to specify the directory.`)
+				}
 				const { resPromise, interrupt } = await this.terminalToolService.runCommand(command, { type: 'temporary', cwd, terminalId })
 				return { result: resPromise, interruptTool: interrupt }
 			},
@@ -506,8 +530,11 @@ export class ToolsService implements IToolsService {
 					: 'No lint errors found.'
 			},
 			// ---
-			create_file_or_folder: (params, result) => {
-				return `URI ${params.uri.fsPath} successfully created.`
+			create_file: (params, result) => {
+				return `File ${params.uri.fsPath} successfully created.`
+			},
+			create_folder: (params, result) => {
+				return `Folder ${params.uri.fsPath} successfully created.`
 			},
 			delete_file_or_folder: (params, result) => {
 				return `URI ${params.uri.fsPath} successfully deleted.`

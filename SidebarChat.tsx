@@ -36,7 +36,6 @@ import { ToolApprovalTypeSwitch } from '../void-settings-tsx/Settings.js';
 import { removeMCPToolNamePrefix } from '../../../../common/mcpServiceTypes.js';
 import { AgentPipelinePanel } from './AgentPipelinePanel.js';
 import { persistentTerminalNameOfId } from '../../../terminalToolService.js';
-import { extractSearchReplaceBlocks, ExtractedSearchReplaceBlock } from '../../../../common/helpers/extractCodeFromResult.js';
 
 
 
@@ -786,7 +785,6 @@ type ToolHeaderParams = {
 	desc2OnClick?: () => void;
 	isOpen?: boolean;
 	className?: string;
-	lineCounts?: { additions: number, deletions: number };
 }
 
 const ToolHeaderWrapper = ({
@@ -807,7 +805,6 @@ const ToolHeaderWrapper = ({
 	isOpen,
 	isRejected,
 	className, // applies to the main content
-	lineCounts,
 }: ToolHeaderParams) => {
 
 	const [isOpen_, setIsOpen] = useState(false);
@@ -861,13 +858,6 @@ const ToolHeaderWrapper = ({
 							{!isDesc1Clickable && desc1HTML}
 						</div>
 						{isDesc1Clickable && desc1HTML}
-						
-						{lineCounts && (lineCounts.additions > 0 || lineCounts.deletions > 0) && (
-							<div className="flex gap-1.5 ml-2 text-xs font-mono items-center opacity-80">
-								{lineCounts.additions > 0 && <span className="text-void-success">+{lineCounts.additions}</span>}
-								{lineCounts.deletions > 0 && <span className="text-void-error">-{lineCounts.deletions}</span>}
-							</div>
-						)}
 					</div>
 
 					{/* right */}
@@ -935,21 +925,8 @@ const EditTool = ({ toolMessage, threadId, messageIdx, content }: Parameters<Res
 	const { rawParams, params, name } = toolMessage
 	const desc1OnClick = () => voidOpenFileFn(params.uri, accessor)
 	const componentParams: ToolHeaderParams = { title, desc1, desc1OnClick, desc1Info, isError, icon, isRejected, }
+			componentParams.dangerLevel = toolMessage ? classifyVoidToolCall(toolMessage.name as ToolName, toolMessage.params).dangerLevel : 'safe';
 
-	let additions = 0;
-	let deletions = 0;
-	if (toolMessage.name === 'edit_file') {
-		const blocks = extractSearchReplaceBlocks(content);
-		blocks.forEach((b: ExtractedSearchReplaceBlock) => {
-			const origLines = b.orig ? b.orig.split('\n').length : 0;
-			const finalLines = b.final ? b.final.split('\n').length : 0;
-			deletions += origLines;
-			additions += finalLines;
-		});
-	} else if (toolMessage.name === 'rewrite_file') {
-		additions = content ? content.split('\n').length : 0;
-	}
-	componentParams.lineCounts = { additions, deletions };
 
 	const editToolType = toolMessage.name === 'edit_file' ? 'diff' : 'rewrite'
 	if (toolMessage.type === 'running_now' || toolMessage.type === 'tool_request') {
@@ -1156,9 +1133,6 @@ const UserMessageComponent = ({ chatMessage, messageIdx, isCheckpointGhost, curr
 		const onAbort = async () => {
 			const threadId = chatThreadsService.state.currentThreadId
 			await chatThreadsService.abortRunning(threadId)
-			if (accessor.get('IVoidSettingsService').state.globalSettings.agentPipelineEnabled) {
-				accessor.get('IAgentPipelineService').pausePipeline()
-			}
 		}
 
 		const onKeyDown = (e: KeyboardEvent<HTMLTextAreaElement>) => {
@@ -1444,8 +1418,7 @@ const titleOfBuiltinToolName = {
 	'get_dir_tree': { done: 'Inspected folder tree', proposed: 'Inspect folder tree', running: loadingTitleWrapper('Inspecting folder tree') },
 	'search_pathnames_only': { done: 'Searched by file name', proposed: 'Search by file name', running: loadingTitleWrapper('Searching by file name') },
 	'search_for_files': { done: 'Searched', proposed: 'Search', running: loadingTitleWrapper('Searching') },
-	'create_file': { done: `Created file`, proposed: `Create file`, running: loadingTitleWrapper(`Creating file`) },
-	'create_folder': { done: `Created folder`, proposed: `Create folder`, running: loadingTitleWrapper(`Creating folder`) },
+	'create_file_or_folder': { done: `Created`, proposed: `Create`, running: loadingTitleWrapper(`Creating`) },
 	'delete_file_or_folder': { done: `Deleted`, proposed: `Delete`, running: loadingTitleWrapper(`Deleting`) },
 	'edit_file': { done: `Edited file`, proposed: 'Edit file', running: loadingTitleWrapper('Editing file') },
 	'rewrite_file': { done: `Wrote file`, proposed: 'Write file', running: loadingTitleWrapper('Writing file') },
@@ -1535,17 +1508,10 @@ const toolNameToDesc = (toolName: BuiltinToolName, _toolParams: BuiltinToolCallP
 				desc1Info: getRelative(toolParams.uri, accessor),
 			};
 		},
-		'create_file': () => {
-			const toolParams = _toolParams as BuiltinToolCallParams['create_file']
+		'create_file_or_folder': () => {
+			const toolParams = _toolParams as BuiltinToolCallParams['create_file_or_folder']
 			return {
-				desc1: getBasename(toolParams.uri.fsPath),
-				desc1Info: getRelative(toolParams.uri, accessor),
-			}
-		},
-		'create_folder': () => {
-			const toolParams = _toolParams as BuiltinToolCallParams['create_folder']
-			return {
-				desc1: getFolderName(toolParams.uri.fsPath) ?? '/',
+				desc1: toolParams.isFolder ? getFolderName(toolParams.uri.fsPath) ?? '/' : getBasename(toolParams.uri.fsPath),
 				desc1Info: getRelative(toolParams.uri, accessor),
 			}
 		},
@@ -1614,25 +1580,15 @@ const toolNameToDesc = (toolName: BuiltinToolName, _toolParams: BuiltinToolCallP
 	}
 }
 
-const riskColors: Record<string, string> = {
-	safe: '#3fb950',
-	caution: '#d29922',
-	danger: '#f85149'
-};
-
-const riskLabels: Record<string, string> = {
-	safe: '🟢 Safe',
-	caution: '🟡 Medium Risk',
-	danger: '🔴 High Risk'
-};
-
-const ToolRequestAcceptRejectButtons = ({ chatMessage }: { chatMessage: any }) => {
+const ToolRequestAcceptRejectButtons = ({ toolName }: { toolName: ToolName }) => {
 	const accessor = useAccessor()
 	const chatThreadsService = accessor.get('IChatThreadService')
 	const metricsService = accessor.get('IMetricsService')
+	const voidSettingsService = accessor.get('IVoidSettingsService')
+	const voidSettingsState = useSettingsState()
 
 	const onAccept = useCallback(() => {
-		try {
+		try { // this doesn't need to be wrapped in try/catch anymore
 			const threadId = chatThreadsService.state.currentThreadId
 			chatThreadsService.approveLatestToolRequest(threadId)
 			metricsService.capture('Tool Request Accepted', {})
@@ -1647,95 +1603,48 @@ const ToolRequestAcceptRejectButtons = ({ chatMessage }: { chatMessage: any }) =
 		metricsService.capture('Tool Request Rejected', {})
 	}, [chatThreadsService, metricsService])
 
-	const toolName = chatMessage.name
-	const isTerminalTool = ['run_command', 'run_persistent_command'].includes(toolName as string)
-	
-	// Default to caution if unknown
-	let dangerLevel = 'caution'
-	let commandStr = ''
-	
-	if (isTerminalTool) {
-		commandStr = chatMessage.params?.command || ''
-		
-		const dangerPatterns = [
-			/\brm\b/, /\brmdir\b/, /\bdel\b/, /\brd\b/,
-			/\bformat\b/, /\bfdisk\b/, /\bdd\b/,
-			/\bsudo\b/,
-			/curl.+\|\s*(sh|bash)/, /wget.+\|\s*(sh|bash)/,
-			/\bgit\s+reset\s+--hard\b/,
-			/\bgit\s+push.+--force\b/,
-			/\bnpm\s+publish\b/, /\byarn\s+publish\b/,
-			/\bdrop\s+table\b/,
-			/\bkill\b/, /\bpkill\b/, /\bkillall\b/,
-			/\bchmod\s+[0-7]*7[0-7]*7/,
-		];
-		const cautionPatterns = [
-			/\bmv\b/, /\bcp\b/, /\bchmod\b/, /\bchown\b/,
-			/\bgit\s+(push|merge|rebase)\b/,
-			/\bnpm\s+install\b/, /\byarn\s+add\b/, /\bpip\s+install\b/,
-			/\bdocker\b/, /\bkubectl\b/,
-		];
-		
-		const c = commandStr.trim().toLowerCase()
-		if (dangerPatterns.some(p => p.test(c))) dangerLevel = 'danger'
-		else if (cautionPatterns.some(p => p.test(c))) dangerLevel = 'caution'
-		else dangerLevel = 'safe'
-	}
+	const approveButton = (
+		<button
+			onClick={onAccept}
+			className={`
+                px-2 py-1
+                bg-[var(--vscode-button-background)]
+                text-[var(--vscode-button-foreground)]
+                hover:bg-[var(--vscode-button-hoverBackground)]
+                rounded
+                text-sm font-medium
+            `}
+		>
+			Approve
+		</button>
+	)
+
+	const cancelButton = (
+		<button
+			onClick={onReject}
+			className={`
+                px-2 py-1
+                bg-[var(--vscode-button-secondaryBackground)]
+                text-[var(--vscode-button-secondaryForeground)]
+                hover:bg-[var(--vscode-button-secondaryHoverBackground)]
+                rounded
+                text-sm font-medium
+            `}
+		>
+			Cancel
+		</button>
+	)
 
 	const approvalType = isABuiltinToolName(toolName) ? approvalTypeOfBuiltinToolName[toolName] : 'MCP tools'
+	const approvalToggle = approvalType ? <div key={approvalType} className="flex items-center ml-2 gap-x-1">
+		<ToolApprovalTypeSwitch size='xs' approvalType={approvalType} desc={`Auto-approve ${approvalType}`} />
+	</div> : null
 
-	return (
-		<div className="flex flex-col gap-2 mt-2 mb-2 w-full" style={{
-			border: `1px solid ${riskColors[dangerLevel]}50`,
-			borderRadius: '8px',
-			padding: '12px',
-			backgroundColor: 'var(--vscode-editor-background)',
-			boxShadow: '0 4px 6px -1px rgba(0, 0, 0, 0.1), 0 2px 4px -1px rgba(0, 0, 0, 0.06)'
-		}}>
-			<div className="flex items-center gap-2 mb-1">
-				<span className="text-base">{isTerminalTool ? '⚡' : '🛠️'}</span>
-				<strong className="text-void-fg-1 text-sm font-semibold tracking-wide">
-					{isTerminalTool ? 'Terminal Command' : toolName}
-				</strong>
-				<span className="ml-auto text-[11px] font-semibold" style={{ color: riskColors[dangerLevel] }}>
-					{riskLabels[dangerLevel]}
-				</span>
-			</div>
-
-			<p className="text-xs text-void-fg-3 m-0">
-				The agent wants your permission to execute this.
-			</p>
-
-			{isTerminalTool && commandStr && (
-				<div className="bg-void-bg-1 border border-void-border-1 rounded-md p-2 mt-2 mb-2 font-mono text-[11px] text-void-fg-2 overflow-x-auto whitespace-pre-wrap">
-					$ {commandStr}
-				</div>
-			)}
-
-			<div className="flex gap-2 mt-2 flex-wrap items-center">
-				<button
-					onClick={onAccept}
-					className="px-4 py-1.5 bg-[#238636] hover:bg-[#2ea043] active:bg-[#238636] text-white rounded-md text-xs font-semibold shadow-sm transition-all duration-150"
-				>
-					✅ {isTerminalTool ? 'Run' : 'Approve'}
-				</button>
-
-				<button
-					onClick={onReject}
-					className="px-4 py-1.5 bg-transparent border border-[#f85149] hover:bg-[#f85149]/10 text-[#f85149] rounded-md text-xs font-semibold transition-all duration-150"
-				>
-					❌ Reject
-				</button>
-				
-				{approvalType && (
-					<div className="flex items-center ml-auto gap-x-2">
-						<span className="text-[10px] text-void-fg-3 font-medium uppercase tracking-wider">Auto-approve</span>
-						<ToolApprovalTypeSwitch size='xs' approvalType={approvalType} desc={`Auto-approve ${approvalType}`} />
-					</div>
-				)}
-			</div>
-		</div>
-	)
+	return <div className="flex gap-2 mx-0.5 items-center">
+		{approveButton}
+		{cancelButton}
+		{approvalToggle}
+	</div>
 }
 
 export const ToolChildrenWrapper = ({ children, className }: { children: React.ReactNode, className?: string }) => {
@@ -1838,6 +1747,7 @@ const InvalidTool = ({ toolName, message, mcpServerName }: { toolName: ToolName,
 	const icon = null
 	const isError = true
 	const componentParams: ToolHeaderParams = { title, desc1, isError, icon }
+			componentParams.dangerLevel = toolMessage ? classifyVoidToolCall(toolMessage.name as ToolName, toolMessage.params).dangerLevel : 'safe';
 
 	componentParams.children = <ToolChildrenWrapper>
 		<CodeChildren className='bg-void-bg-3'>
@@ -1854,6 +1764,7 @@ const CanceledTool = ({ toolName, mcpServerName }: { toolName: ToolName, mcpServ
 	const icon = null
 	const isRejected = true
 	const componentParams: ToolHeaderParams = { title, desc1, icon, isRejected }
+			componentParams.dangerLevel = toolMessage ? classifyVoidToolCall(toolMessage.name as ToolName, toolMessage.params).dangerLevel : 'safe';
 	return <ToolHeaderWrapper {...componentParams} />
 }
 
@@ -1881,6 +1792,7 @@ const CommandTool = ({ toolMessage, type, threadId }: { threadId: string } & ({
 	const isRejected = toolMessage.type === 'rejected'
 	const { rawParams, params } = toolMessage
 	const componentParams: ToolHeaderParams = { title, desc1, desc1Info, isError, icon, isRejected, }
+			componentParams.dangerLevel = toolMessage ? classifyVoidToolCall(toolMessage.name as ToolName, toolMessage.params).dangerLevel : 'safe';
 
 
 	const effect = async () => {
@@ -1977,6 +1889,7 @@ const MCPToolWrapper = ({ toolMessage }: WrapperProps<string>) => {
 	const isRejected = toolMessage.type === 'rejected'
 	const { rawParams, params } = toolMessage
 	const componentParams: ToolHeaderParams = { title, desc1, isError, icon, isRejected, }
+			componentParams.dangerLevel = toolMessage ? classifyVoidToolCall(toolMessage.name as ToolName, toolMessage.params).dangerLevel : 'safe';
 
 	const paramsStr = JSON.stringify(params, null, 2)
 	componentParams.desc2 = <CopyButton codeStr={paramsStr} toolTipName={`Copy inputs: ${paramsStr}`} />
@@ -2033,6 +1946,7 @@ const builtinToolNameToComponent: { [T in BuiltinToolName]: { resultWrapper: Res
 			const isRejected = toolMessage.type === 'rejected'
 			const { rawParams, params } = toolMessage
 			const componentParams: ToolHeaderParams = { title, desc1, desc1Info, isError, icon, isRejected, }
+			componentParams.dangerLevel = toolMessage ? classifyVoidToolCall(toolMessage.name as ToolName, toolMessage.params).dangerLevel : 'safe';
 
 			let range: [number, number] | undefined = undefined
 			if (toolMessage.params.startLine !== null || toolMessage.params.endLine !== null) {
@@ -2080,6 +1994,7 @@ const builtinToolNameToComponent: { [T in BuiltinToolName]: { resultWrapper: Res
 			const isRejected = toolMessage.type === 'rejected'
 			const { rawParams, params } = toolMessage
 			const componentParams: ToolHeaderParams = { title, desc1, desc1Info, isError, icon, isRejected, }
+			componentParams.dangerLevel = toolMessage ? classifyVoidToolCall(toolMessage.name as ToolName, toolMessage.params).dangerLevel : 'safe';
 
 			if (params.uri) {
 				const rel = getRelative(params.uri, accessor)
@@ -2128,6 +2043,7 @@ const builtinToolNameToComponent: { [T in BuiltinToolName]: { resultWrapper: Res
 			const isRejected = toolMessage.type === 'rejected'
 			const { rawParams, params } = toolMessage
 			const componentParams: ToolHeaderParams = { title, desc1, desc1Info, isError, icon, isRejected, }
+			componentParams.dangerLevel = toolMessage ? classifyVoidToolCall(toolMessage.name as ToolName, toolMessage.params).dangerLevel : 'safe';
 
 			if (params.uri) {
 				const rel = getRelative(params.uri, accessor)
@@ -2181,6 +2097,7 @@ const builtinToolNameToComponent: { [T in BuiltinToolName]: { resultWrapper: Res
 
 			const { rawParams, params } = toolMessage
 			const componentParams: ToolHeaderParams = { title, desc1, desc1Info, isError, icon, isRejected, }
+			componentParams.dangerLevel = toolMessage ? classifyVoidToolCall(toolMessage.name as ToolName, toolMessage.params).dangerLevel : 'safe';
 
 			if (params.includePattern) {
 				componentParams.info = `Only search in ${params.includePattern}`
@@ -2230,6 +2147,7 @@ const builtinToolNameToComponent: { [T in BuiltinToolName]: { resultWrapper: Res
 
 			const { rawParams, params } = toolMessage
 			const componentParams: ToolHeaderParams = { title, desc1, desc1Info, isError, icon, isRejected, }
+			componentParams.dangerLevel = toolMessage ? classifyVoidToolCall(toolMessage.name as ToolName, toolMessage.params).dangerLevel : 'safe';
 
 			if (params.searchInFolder || params.isRegex) {
 				let info: string[] = []
@@ -2285,6 +2203,7 @@ const builtinToolNameToComponent: { [T in BuiltinToolName]: { resultWrapper: Res
 
 			const { rawParams, params } = toolMessage;
 			const componentParams: ToolHeaderParams = { title, desc1, desc1Info, isError, icon, isRejected };
+			componentParams.dangerLevel = toolMessage ? classifyVoidToolCall(toolMessage.name as ToolName, toolMessage.params).dangerLevel : 'safe';
 
 			const infoarr: string[] = []
 			const uriStr = getRelative(params.uri, accessor)
@@ -2335,6 +2254,7 @@ const builtinToolNameToComponent: { [T in BuiltinToolName]: { resultWrapper: Res
 			const isRejected = toolMessage.type === 'rejected'
 			const { rawParams, params } = toolMessage
 			const componentParams: ToolHeaderParams = { title, desc1, desc1Info, isError, icon, isRejected, }
+			componentParams.dangerLevel = toolMessage ? classifyVoidToolCall(toolMessage.name as ToolName, toolMessage.params).dangerLevel : 'safe';
 
 			componentParams.info = getRelative(uri, accessor) // full path
 
@@ -2363,7 +2283,7 @@ const builtinToolNameToComponent: { [T in BuiltinToolName]: { resultWrapper: Res
 
 	// ---
 
-	'create_file': {
+	'create_file_or_folder': {
 		resultWrapper: ({ toolMessage }) => {
 			const accessor = useAccessor()
 			const commandService = accessor.get('ICommandService')
@@ -2376,48 +2296,7 @@ const builtinToolNameToComponent: { [T in BuiltinToolName]: { resultWrapper: Res
 
 			const { rawParams, params } = toolMessage
 			const componentParams: ToolHeaderParams = { title, desc1, desc1Info, isError, icon, isRejected, }
-
-			componentParams.info = getRelative(params.uri, accessor) // full path
-
-			if (toolMessage.type === 'success') {
-				const { result } = toolMessage
-				componentParams.onClick = () => { voidOpenFileFn(params.uri, accessor) }
-			}
-			else if (toolMessage.type === 'rejected') {
-				componentParams.onClick = () => { voidOpenFileFn(params.uri, accessor) }
-			}
-			else if (toolMessage.type === 'tool_error') {
-				const { result } = toolMessage
-				if (params) { componentParams.onClick = () => { voidOpenFileFn(params.uri, accessor) } }
-				componentParams.bottomChildren = <BottomChildren title='Error'>
-					<CodeChildren>
-						{result}
-					</CodeChildren>
-				</BottomChildren>
-			}
-			else if (toolMessage.type === 'running_now') {
-				// nothing more is needed
-			}
-			else if (toolMessage.type === 'tool_request') {
-				// nothing more is needed
-			}
-
-			return <ToolHeaderWrapper {...componentParams} />
-		}
-	},
-	'create_folder': {
-		resultWrapper: ({ toolMessage }) => {
-			const accessor = useAccessor()
-			const commandService = accessor.get('ICommandService')
-			const isError = false
-			const isRejected = toolMessage.type === 'rejected'
-			const title = getTitle(toolMessage)
-			const { desc1, desc1Info } = toolNameToDesc(toolMessage.name, toolMessage.params, accessor)
-			const icon = null
-
-
-			const { rawParams, params } = toolMessage
-			const componentParams: ToolHeaderParams = { title, desc1, desc1Info, isError, icon, isRejected, }
+			componentParams.dangerLevel = toolMessage ? classifyVoidToolCall(toolMessage.name as ToolName, toolMessage.params).dangerLevel : 'safe';
 
 			componentParams.info = getRelative(params.uri, accessor) // full path
 
@@ -2460,6 +2339,7 @@ const builtinToolNameToComponent: { [T in BuiltinToolName]: { resultWrapper: Res
 
 			const { rawParams, params } = toolMessage
 			const componentParams: ToolHeaderParams = { title, desc1, desc1Info, isError, icon, isRejected, }
+			componentParams.dangerLevel = toolMessage ? classifyVoidToolCall(toolMessage.name as ToolName, toolMessage.params).dangerLevel : 'safe';
 
 			componentParams.info = getRelative(params.uri, accessor) // full path
 
@@ -2531,6 +2411,7 @@ const builtinToolNameToComponent: { [T in BuiltinToolName]: { resultWrapper: Res
 			const isRejected = toolMessage.type === 'rejected'
 			const { rawParams, params } = toolMessage
 			const componentParams: ToolHeaderParams = { title, desc1, desc1Info, isError, icon, isRejected, }
+			componentParams.dangerLevel = toolMessage ? classifyVoidToolCall(toolMessage.name as ToolName, toolMessage.params).dangerLevel : 'safe';
 
 			const relativePath = params.cwd ? getRelative(URI.file(params.cwd), accessor) : ''
 			componentParams.info = relativePath ? `Running in ${relativePath}` : undefined
@@ -2570,6 +2451,7 @@ const builtinToolNameToComponent: { [T in BuiltinToolName]: { resultWrapper: Res
 			const isRejected = toolMessage.type === 'rejected'
 			const { rawParams, params } = toolMessage
 			const componentParams: ToolHeaderParams = { title, desc1, desc1Info, isError, icon, isRejected, }
+			componentParams.dangerLevel = toolMessage ? classifyVoidToolCall(toolMessage.name as ToolName, toolMessage.params).dangerLevel : 'safe';
 
 			if (toolMessage.type === 'success') {
 				const { persistentTerminalId } = params
@@ -2658,7 +2540,6 @@ const _ChatBubble = ({ threadId, chatMessage, currCheckpointIdx, isCommitted, me
 	const isCheckpointGhost = messageIdx > (currCheckpointIdx ?? Infinity) && !chatIsRunning // whether to show as gray (if chat is running, for good measure just dont show any ghosts)
 
 	if (role === 'user') {
-		if (!chatMessage.displayContent || chatMessage.displayContent.trim() === '') return null;
 		return <UserMessageComponent
 			chatMessage={chatMessage}
 			isCheckpointGhost={isCheckpointGhost}
@@ -2699,7 +2580,7 @@ const _ChatBubble = ({ threadId, chatMessage, currCheckpointIdx, isCommitted, me
 				</div>
 				{chatMessage.type === 'tool_request' ?
 					<div className={`${isCheckpointGhost ? 'opacity-50 pointer-events-none' : ''}`}>
-						<ToolRequestAcceptRejectButtons chatMessage={chatMessage} />
+						<ToolRequestAcceptRejectButtons toolName={chatMessage.name} />
 					</div> : null}
 			</>
 		return null
@@ -3055,7 +2936,11 @@ export const SidebarChat = () => {
 
 	// state of current message
 	const initVal = ''
-
+	const [debugMsg, setDebugMsg] = useState<string>('')
+	
+	useEffect(() => {
+		
+	}, [])
 
 	const [instructionsAreEmpty, setInstructionsAreEmpty] = useState(!initVal)
 	const inputTextRef = useRef(initVal)
@@ -3067,54 +2952,53 @@ export const SidebarChat = () => {
 	const scrollContainerRef = useRef<HTMLDivElement | null>(null)
 	const onSubmit = useCallback(async (_forceSubmit?: string) => {
 		const userMessage = _forceSubmit || inputTextRef.current || ''
-		
+		// BRUTAL DEBUGGING ALERT (RENDERED IN DOM)
 		if (!userMessage.trim()) {
+			
 			return
 		}
 		if (isDisabled && !_forceSubmit) {
+			`);
 			return
 		}
 		if (isRunning) {
+			
 			return
 		}
+		
+		
 
 		const threadId = chatThreadsService.state.currentThreadId
-
-		// Clear the text inputs immediately
-		setSelections([]) // clear staging
-		inputTextRef.current = ''
-		textAreaFnsRef.current?.setValue('')
-		textAreaRef.current?.focus() // focus input after submit
 
 		const agentPipelineService = accessor.get('IAgentPipelineService')
 		if (settingsState.globalSettings.agentPipelineEnabled) {
 			try {
-				// Add the user message to the thread so it shows up in UI
-				const fullUserMessage = await chatThreadsService.addPipelineUserMessage(threadId, userMessage)
-				
-				// Start pipeline asynchronously (don't await so UI is snappy)
-				agentPipelineService.startPipeline(fullUserMessage).catch(e => {
-					console.error('Error starting agent pipeline:', e)
-				})
+				await agentPipelineService.startPipeline(userMessage)
 			} catch (e) {
-				console.error('Error preparing agent pipeline:', e)
+				const errStr = e instanceof Error ? e.message : String(e);
+				
+				console.error('Error starting agent pipeline:', e)
 			}
 		} else {
 			try {
 				await chatThreadsService.addUserMessageAndStreamResponse({ userMessage, threadId })
 			} catch (e) {
+				const errStr = e instanceof Error ? e.message : String(e);
+				
 				console.error('Error while sending message in chat:', e)
 			}
 		}
+
+		setSelections([]) // clear staging
+		inputTextRef.current = ''
+		textAreaFnsRef.current?.setValue('')
+		textAreaRef.current?.focus() // focus input after submit
 
 	}, [chatThreadsService, isDisabled, isRunning, textAreaRef, textAreaFnsRef, setSelections, settingsState])
 
 	const onAbort = async () => {
 		const threadId = currentThread.id
 		await chatThreadsService.abortRunning(threadId)
-		if (accessor.get('IVoidSettingsService').state.globalSettings.agentPipelineEnabled) {
-			accessor.get('IAgentPipelineService').pausePipeline()
-		}
 	}
 
 	const keybindingString = accessor.get('IKeybindingService').lookupKeybinding(VOID_CTRL_L_ACTION_ID)?.getLabel()
@@ -3140,7 +3024,8 @@ export const SidebarChat = () => {
 
 	const previousMessagesHTML = useMemo(() => {
 		// const lastMessageIdx = previousMessages.findLastIndex(v => v.role !== 'checkpoint')
-		let lastVisibleRole: string | null = null;
+		// tool request shows up as Editing... if in progress
+		let lastVisibleRole = null;
 		return previousMessages.map((message, i) => {
 			let isVisible = true;
 			if (message.role === 'user' && (!message.displayContent || message.displayContent.trim() === '')) isVisible = false;
@@ -3149,7 +3034,6 @@ export const SidebarChat = () => {
 			}
 			if (isVisible) lastVisibleRole = message.role;
 			if (!isVisible) return null;
-			
 			return <ChatBubble
 				key={i}
 				currCheckpointIdx={currCheckpointIdx}
@@ -3300,6 +3184,7 @@ export const SidebarChat = () => {
 		ref={sidebarRef}
 		className='w-full h-full max-h-full flex flex-col overflow-auto px-4'
 	>
+		
 		{settingsState.globalSettings.agentPipelineEnabled && (
 			<ErrorBoundary>
 				<AgentPipelinePanel className="flex-shrink-0" />
@@ -3340,6 +3225,7 @@ export const SidebarChat = () => {
 		ref={sidebarRef}
 		className='w-full h-full flex flex-col overflow-hidden'
 	>
+		
 
 		{settingsState.globalSettings.agentPipelineEnabled && (
 			<ErrorBoundary>

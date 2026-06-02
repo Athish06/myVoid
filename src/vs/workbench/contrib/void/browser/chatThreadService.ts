@@ -13,7 +13,7 @@ import { ILLMMessageService } from '../common/sendLLMMessageService.js';
 import { chat_userMessageContent, isABuiltinToolName } from '../common/prompt/prompts.js';
 import { AnthropicReasoning, getErrorMessage, RawToolCallObj, RawToolParamsObj } from '../common/sendLLMMessageTypes.js';
 import { generateUuid } from '../../../../base/common/uuid.js';
-import { FeatureName, ModelSelection, ModelSelectionOptions } from '../common/voidSettingsTypes.js';
+import { FeatureName, ModelSelection, ModelSelectionOptions, ChatMode } from '../common/voidSettingsTypes.js';
 import { IVoidSettingsService } from '../common/voidSettingsService.js';
 import { approvalTypeOfBuiltinToolName, BuiltinToolCallParams, ToolCallParams, ToolName, ToolResult } from '../common/toolsServiceTypes.js';
 import { IToolsService } from './toolsService.js';
@@ -24,9 +24,12 @@ import { Position } from '../../../../editor/common/core/position.js';
 import { IMetricsService } from '../common/metricsService.js';
 import { shorten } from '../../../../base/common/labels.js';
 import { IVoidModelService } from '../common/voidModelService.js';
+import { IMemoryStore } from '../common/memoryStore.js';
 import { findLast, findLastIdx } from '../../../../base/common/arraysFind.js';
 import { IEditCodeService } from './editCodeServiceInterface.js';
 import { VoidFileSnapshot } from '../common/editCodeServiceTypes.js';
+import { classifyVoidToolCall } from '../common/operationClassifier.js';
+
 import { INotificationService, Severity } from '../../../../platform/notification/common/notification.js';
 import { truncate } from '../../../../base/common/strings.js';
 import { THREAD_STORAGE_KEY } from '../common/storageKeys.js';
@@ -137,9 +140,16 @@ class ChatThreadService extends Disposable implements IChatThreadService {
 	// used in checkpointing
 	// private readonly _userModifiedFilesToCheckInCheckpoints = new LRUCache<string, null>(50)
 
+	private _pipelineAutoApproveActive: boolean = false;
+	private _chatModeOverride: ChatMode | null = null;
 
+	setPipelineAutoApprove(active: boolean): void {
+		this._pipelineAutoApproveActive = active;
+	}
 
-	constructor(
+	setChatModeOverride(mode: ChatMode | null): void {
+		this._chatModeOverride = mode;
+	}	constructor(
 		@IStorageService private readonly _storageService: IStorageService,
 		@IVoidModelService private readonly _voidModelService: IVoidModelService,
 		@ILLMMessageService private readonly _llmMessageService: ILLMMessageService,
@@ -154,6 +164,7 @@ class ChatThreadService extends Disposable implements IChatThreadService {
 		@IDirectoryStrService private readonly _directoryStringService: IDirectoryStrService,
 		@IFileService private readonly _fileService: IFileService,
 		@IMCPService private readonly _mcpService: IMCPService,
+		@IMemoryStore private readonly _memoryStore: IMemoryStore,
 	) {
 		super()
 		this.state = { allThreads: {}, currentThreadId: null as unknown as string } // default state
@@ -462,15 +473,18 @@ class ChatThreadService extends Disposable implements IChatThreadService {
 				this._addMessageToThread(threadId, { role: 'tool', type: 'invalid_params', rawParams: opts.unvalidatedToolParams, result: null, name: toolName, content: errorMessage, id: toolId, mcpServerName })
 				return {}
 			}
-			// once validated, add checkpoint for edit
-			if (toolName === 'edit_file') { this._addToolEditCheckpoint({ threadId, uri: (toolParams as BuiltinToolCallParams['edit_file']).uri }) }
-			if (toolName === 'rewrite_file') { this._addToolEditCheckpoint({ threadId, uri: (toolParams as BuiltinToolCallParams['rewrite_file']).uri }) }
-
+			// once validated, no longer adding checkpoints per tool edit
+			// checkpoints will now only be created per prompt
 			// 2. if tool requires approval, break from the loop, awaiting approval
 
 			const approvalType = isBuiltInTool ? approvalTypeOfBuiltinToolName[toolName] : 'MCP tools'
 			if (approvalType) {
-				const autoApprove = this._settingsService.state.globalSettings.autoApprove[approvalType]
+				let autoApprove = this._settingsService.state.globalSettings.autoApprove[approvalType]
+				if (this._pipelineAutoApproveActive && isBuiltInTool) {
+					const classification = classifyVoidToolCall(toolName, toolParams)
+					autoApprove = !classification.requiresApproval
+				}
+
 				// add a tool_request because we use it for UI if a tool is loading (this should be improved in the future)
 				this._addMessageToThread(threadId, { role: 'tool', type: 'tool_request', content: '(Awaiting user permission...)', result: null, name: toolName, params: toolParams, id: toolId, rawParams: opts.unvalidatedToolParams, mcpServerName })
 				if (!autoApprove) {
@@ -575,7 +589,7 @@ class ChatThreadService extends Disposable implements IChatThreadService {
 		// _runToolCall does not need setStreamState({idle}) before it, but it needs it after it. (handles its own setStreamState)
 
 		// above just defines helpers, below starts the actual function
-		const { chatMode } = this._settingsService.state.globalSettings // should not change as we loop even if user changes it, so it goes here
+		const chatMode = this._chatModeOverride ?? this._settingsService.state.globalSettings.chatMode // should not change as we loop even if user changes it, so it goes here
 		const { overridesOfModel } = this._settingsService.state
 
 		let nMessagesSent = 0
@@ -702,7 +716,33 @@ class ChatThreadService extends Disposable implements IChatThreadService {
 				}
 
 				// llm res success
-				const { toolCall, info } = llmRes
+				let { toolCall, info } = llmRes
+
+				if (!toolCall) {
+					const xmlToolMatch = info.fullText.match(/<tool_call>([\s\S]*?)<\/tool_call>/);
+					if (xmlToolMatch) {
+						try {
+							let jsonString = xmlToolMatch[1].trim();
+							// Strip out markdown code blocks if the model wrapped it
+							jsonString = jsonString.replace(/^```json\s*/i, '').replace(/```$/i, '').trim();
+							
+							const parsedJson = JSON.parse(jsonString);
+							if (parsedJson.name && parsedJson.params) {
+								toolCall = {
+									id: 'fallback-' + generateUuid(),
+									name: parsedJson.name as ToolName,
+									rawParams: parsedJson.params,
+									isDone: true,
+									doneParams: parsedJson.params
+								}
+								// Remove the parsed tool call from the display text so it doesn't clutter the UI
+								info.fullText = info.fullText.replace(xmlToolMatch[0], '').trim()
+							}
+						} catch (e) {
+							console.warn('Failed to parse fallback tool call XML', e)
+						}
+					}
+				}
 
 				this._addMessageToThread(threadId, { role: 'assistant', displayContent: info.fullText, reasoning: info.fullReasoning, anthropicReasoning: info.anthropicReasoning })
 
@@ -827,20 +867,7 @@ class ChatThreadService extends Disposable implements IChatThreadService {
 			userModifications: { voidFileSnapshotOfURI: {}, },
 		})
 	}
-	// call this right after LLM edits a file
-	private _addToolEditCheckpoint({ threadId, uri, }: { threadId: string, uri: URI }) {
-		const thread = this.state.allThreads[threadId]
-		if (!thread) return
-		const { model } = this._voidModelService.getModel(uri)
-		if (!model) return // should never happen
-		const diffAreasSnapshot = this._editCodeService.getVoidFileSnapshot(uri)
-		this._addCheckpoint(threadId, {
-			role: 'checkpoint',
-			type: 'tool_edit',
-			voidFileSnapshotOfURI: { [uri.fsPath]: diffAreasSnapshot },
-			userModifications: { voidFileSnapshotOfURI: {} },
-		})
-	}
+
 
 
 	private _getCheckpointBeforeMessage = ({ threadId, messageIdx }: { threadId: string, messageIdx: number }): [CheckpointEntry, number] | undefined => {
@@ -1074,12 +1101,19 @@ We only need to do it for files that were edited since `from`, ie files between 
 
 
 		// add user's message to chat history
-		const instructions = userMessage
+		const isPipelineHidden = userMessage.startsWith('__PIPELINE_HIDDEN__')
+		const instructions = isPipelineHidden ? userMessage.replace('__PIPELINE_HIDDEN__\n', '') : userMessage
 		const currSelns: StagingSelectionItem[] = _chatSelections ?? thread.state.stagingSelections
 
 		const userMessageContent = await chat_userMessageContent(instructions, currSelns, { directoryStrService: this._directoryStringService, fileService: this._fileService }) // user message + names of files (NOT content)
-		const userHistoryElt: ChatMessage = { role: 'user', content: userMessageContent, displayContent: instructions, selections: currSelns, state: defaultMessageState }
-		this._addMessageToThread(threadId, userHistoryElt)
+		const displayContent = isPipelineHidden ? '' : instructions
+		const userHistoryElt: ChatMessage = { role: 'user', content: userMessageContent, displayContent, selections: currSelns, state: defaultMessageState }
+		if (!isPipelineHidden) {
+			this._addMessageToThread(threadId, userHistoryElt)
+		} else {
+			// Still add to history for context, but don't display
+			this._addMessageToThread(threadId, userHistoryElt)
+		}
 
 		this._setThreadState(threadId, { currCheckpointIdx: null }) // no longer at a checkpoint because started streaming
 
@@ -1094,6 +1128,48 @@ We only need to do it for files that were edited since `from`, ie files between 
 		})
 	}
 
+	async addPipelineUserMessage(threadId: string, userMessage: string): Promise<string> {
+		const thread = this.state.allThreads[threadId];
+		if (!thread) return userMessage;
+
+		// if there's a current checkpoint, delete all messages after it
+		if (thread.state.currCheckpointIdx !== null) {
+			const checkpointIdx = thread.state.currCheckpointIdx;
+			const newMessages = thread.messages.slice(0, checkpointIdx + 1);
+
+			// Update the thread with truncated messages
+			const newThreads = {
+				...this.state.allThreads,
+				[threadId]: {
+					...thread,
+					lastModified: new Date().toISOString(),
+					messages: newMessages,
+				}
+			};
+			this._storeAllThreads(newThreads);
+			// Also update current state so it's correct right away
+			this.state.allThreads[threadId] = newThreads[threadId];
+		}
+
+		// add dummy before this message to keep checkpoint before user message idea consistent
+		if (this.state.allThreads[threadId].messages.length === 0) {
+			this._addUserCheckpoint({ threadId })
+		}
+
+		const currSelns: StagingSelectionItem[] = this.state.allThreads[threadId].state.stagingSelections
+		const userMessageContent = await chat_userMessageContent(userMessage, currSelns, { directoryStrService: this._directoryStringService, fileService: this._fileService }) // user message + names of files (NOT content)
+		const userHistoryElt: ChatMessage = { role: 'user', content: userMessageContent, displayContent: userMessage, selections: currSelns, state: defaultMessageState }
+		
+		this._addMessageToThread(threadId, userHistoryElt)
+		this._setThreadState(threadId, { currCheckpointIdx: null }) // no longer at a checkpoint
+
+		// scroll to bottom
+		this.state.allThreads[threadId]?.state.mountedInfo?.whenMounted.then(m => {
+			m.scrollToBottom()
+		})
+
+		return userMessageContent
+	}
 
 	async addUserMessageAndStreamResponse({ userMessage, _chatSelections, threadId }: { userMessage: string, _chatSelections?: StagingSelectionItem[], threadId: string }) {
 		const thread = this.state.allThreads[threadId];
@@ -1485,6 +1561,8 @@ We only need to do it for files that were edited since `from`, ie files between 
 		// store the updated threads
 		this._storeAllThreads(newThreads);
 		this._setState({ ...this.state, allThreads: newThreads })
+		
+		this._memoryStore.clearMemory().catch(console.error);
 	}
 
 	duplicateThread(threadId: string) {

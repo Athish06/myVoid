@@ -180,8 +180,11 @@ const parseXMLPrefixToToolCall = <T extends ToolName,>(toolName: T, toolId: stri
 		}
 
 		// return tool call
+		let outName = toolName;
+		if (outName === 'execute_command' as any) outName = 'run_command' as any;
+
 		const ans: RawToolCallObj = {
-			name: toolName,
+			name: outName,
 			rawParams: paramsObj,
 			doneParams: doneParams,
 			isDone: isDone,
@@ -191,21 +194,43 @@ const parseXMLPrefixToToolCall = <T extends ToolName,>(toolName: T, toolId: stri
 	}
 
 	// find first toolName tag
-	const openToolTag = `<${toolName}>`
-	let i = str.indexOf(openToolTag)
-	if (i === -1) return getAnswer()
+	const openToolRegex = new RegExp(`<${toolName}(?:\\s+[^>]*?)?>`)
+	const match = str.match(openToolRegex)
+	if (!match) return getAnswer()
+	let i = match.index!
+	let openTagStr = match[0]
+	
 	let j = str.lastIndexOf(`</${toolName}>`)
 	if (j === -1) j = Infinity
 	else isDone = true
 
+	// Extract attributes if any
+	const allowedParams = Object.keys(toolOfToolName[toolName]?.params ?? {}) as ToolParamName<T>[]
+	const attrMatches = openTagStr.match(/([a-zA-Z0-9_-]+)="([^"]*)"/g)
+	if (attrMatches) {
+		attrMatches.forEach(attr => {
+			const splitIdx = attr.indexOf('=')
+			const key = attr.substring(0, splitIdx)
+			const val = attr.substring(splitIdx + 1).replace(/^"|"$/g, '')
+			
+			let paramName = key
+			if (key === 'file_path' || key === 'path') paramName = 'uri'
+			if ((key === 'content' || key === 'blocks' || key === 'searchReplaceBlocks') && allowedParams.includes('search_replace_blocks' as any)) paramName = 'search_replace_blocks'
+			
+			if (allowedParams.includes(paramName as any)) {
+				paramsObj[paramName as any] = val
+				doneParams.push(paramName as any)
+			}
+		})
+	}
 
-	str = str.substring(i + openToolTag.length, j)
+	str = str.substring(i + openTagStr.length, j)
 
 	const pm = new SurroundingsRemover(str)
 
-	const allowedParams = Object.keys(toolOfToolName[toolName]?.params ?? {}) as ToolParamName<T>[]
 	if (allowedParams.length === 0) return getAnswer()
 	let latestMatchedOpenParam: null | ToolParamName<T> = null
+	let latestMatchedOpenParamStr: string | null = null
 	let n = 0
 	while (true) {
 		n += 1
@@ -213,22 +238,53 @@ const parseXMLPrefixToToolCall = <T extends ToolName,>(toolName: T, toolId: stri
 
 		// find the param name opening tag
 		let matchedOpenParam: null | ToolParamName<T> = null
-		for (const paramName of allowedParams) {
+		let matchedOpenParamStr: string | null = null
+		
+		// robustly handle path alias
+		const searchParams = [...allowedParams]
+		if (allowedParams.includes('uri' as any)) {
+			searchParams.push('file_path' as any, 'path' as any)
+		}
+		if (allowedParams.includes('new_content' as any)) {
+			searchParams.push('content' as any)
+		}
+		if (allowedParams.includes('search_replace_blocks' as any)) {
+			searchParams.push('searchReplaceBlocks' as any, 'blocks' as any, 'content' as any)
+		}
+		if (allowedParams.includes('command' as any)) {
+			searchParams.push('arguments' as any, 'args' as any)
+		}
+
+		for (const paramName of searchParams) {
 			const removed = pm.removeFromStartUntilFullMatch(`<${paramName}>`, true)
 			if (removed) {
-				matchedOpenParam = paramName
+				matchedOpenParamStr = paramName
+				if (paramName === 'file_path' || paramName === 'path') matchedOpenParam = 'uri' as any
+				else if (paramName === 'content' && allowedParams.includes('new_content' as any)) matchedOpenParam = 'new_content' as any
+				else if ((paramName === 'content' || paramName === 'blocks' || paramName === 'searchReplaceBlocks') && allowedParams.includes('search_replace_blocks' as any)) matchedOpenParam = 'search_replace_blocks' as any
+				else if (paramName === 'arguments' || paramName === 'args') matchedOpenParam = 'arguments' as any
+				else matchedOpenParam = paramName as any
 				break
 			}
 		}
 		// if did not find a new param, stop
 		if (matchedOpenParam === null) {
-			if (latestMatchedOpenParam !== null) {
-				paramsObj[latestMatchedOpenParam] += pm.value()
+			const remainingText = pm.value();
+			if (remainingText.trim() !== '') {
+				// Find the first missing parameter to assign the remaining text to
+				const missingParam = allowedParams.find(p => !(p in paramsObj));
+				if (missingParam) {
+					paramsObj[missingParam] = remainingText;
+				} else if (latestMatchedOpenParam !== null && !doneParams.includes(latestMatchedOpenParam)) {
+					// Only append to the latest parameter if it hasn't been cleanly closed
+					paramsObj[latestMatchedOpenParam] += remainingText;
+				}
 			}
 			return getAnswer()
 		}
 		else {
 			latestMatchedOpenParam = matchedOpenParam
+			latestMatchedOpenParamStr = matchedOpenParamStr
 		}
 
 		paramsObj[latestMatchedOpenParam] = ''
@@ -236,13 +292,26 @@ const parseXMLPrefixToToolCall = <T extends ToolName,>(toolName: T, toolId: stri
 		// find the param name closing tag
 		let matchedCloseParam: boolean = false
 		let paramContents = ''
-		for (const paramName of allowedParams) {
+		
+		const searchCloseParams = [latestMatchedOpenParamStr!]
+		for (const paramName of searchCloseParams) {
 			const i = pm.i
 			const closeTag = `</${paramName}>`
-			const removed = pm.removeFromStartUntilFullMatch(closeTag, true)
-			if (removed) {
+			const closeTagBackslash = `<\\${paramName}>`
+			
+			const removed1 = pm.removeFromStartUntilFullMatch(closeTag, true)
+			if (removed1) {
 				const i2 = pm.i
 				paramContents = pm.originalS.substring(i, i2 - closeTag.length)
+				matchedCloseParam = true
+				break
+			}
+			
+			pm.i = i
+			const removed2 = pm.removeFromStartUntilFullMatch(closeTagBackslash, true)
+			if (removed2) {
+				const i2 = pm.i
+				paramContents = pm.originalS.substring(i, i2 - closeTagBackslash.length)
 				matchedCloseParam = true
 				break
 			}
@@ -272,8 +341,14 @@ export const extractXMLToolsWrapper = (
 	if (!tools) return { newOnText: onText, newOnFinalMessage: onFinalMessage }
 
 	const toolOfToolName: ToolOfToolName = {}
-	const toolOpenTags = tools.map(t => `<${t.name}>`)
+	const toolOpenPrefixes = tools.map(t => `<${t.name}`)
 	for (const t of tools) { toolOfToolName[t.name] = t }
+
+	// Hack for small models: Alias execute_command to run_command
+	if (toolOfToolName['run_command']) {
+		toolOpenPrefixes.push('<execute_command')
+		toolOfToolName['execute_command' as any] = toolOfToolName['run_command']
+	}
 
 	const toolId = generateUuid()
 
@@ -297,7 +372,7 @@ export const extractXMLToolsWrapper = (
 		if (foundOpenTag === null) {
 			const newFullText = openToolTagBuffer + newText
 			// ensure the code below doesn't run if only half a tag has been written
-			const isPartial = findPartiallyWrittenToolTagAtEnd(newFullText, toolOpenTags)
+			const isPartial = findPartiallyWrittenToolTagAtEnd(newFullText, toolOpenPrefixes)
 			if (isPartial) {
 				// console.log('--- partial!!!')
 				openToolTagBuffer += newText
@@ -309,10 +384,10 @@ export const extractXMLToolsWrapper = (
 				openToolTagBuffer = ''
 				fullText += newText
 
-				const i = findIndexOfAny(fullText, toolOpenTags)
+				const i = findIndexOfAny(fullText, toolOpenPrefixes)
 				if (i !== null) {
 					const [idx, toolTag] = i
-					const toolName = toolTag.substring(1, toolTag.length - 1) as ToolName
+					const toolName = toolTag.substring(1) as ToolName
 					// console.log('found ', toolName)
 					foundOpenTag = { idx, toolName }
 
@@ -332,6 +407,13 @@ export const extractXMLToolsWrapper = (
 				trueFullText.substring(foundOpenTag.idx, Infinity),
 				toolOfToolName,
 			)
+			// Aggressive fallback for edit_file if tag is missing
+			if (latestToolCall && latestToolCall.name === 'edit_file' && !latestToolCall.rawParams['search_replace_blocks']) {
+				const match = trueFullText.match(/<<<<[\s\S]*?====[\s\S]*?>>>>/g);
+				if (match) {
+					latestToolCall.rawParams['search_replace_blocks'] = match.join('\n');
+				}
+			}
 		}
 
 		onText({

@@ -230,7 +230,6 @@ export const builtinTools: {
 		description: `Returns all pathnames that match a given query (searches ONLY file names). You should use this when looking for a file with a specific name or path.`,
 		params: {
 			query: { description: `Your query for the search.` },
-			include_pattern: { description: 'Optional. Only fill this in if you need to limit your search because there were too many results.' },
 			...paginationParam,
 		},
 	},
@@ -242,7 +241,6 @@ export const builtinTools: {
 		description: `Returns a list of file names whose content matches the given query. The query can be any substring or regex.`,
 		params: {
 			query: { description: `Your query for the search.` },
-			search_in_folder: { description: 'Optional. Leave as blank by default. ONLY fill this in if your previous search with the same query was truncated. Searches descendants of this folder only.' },
 			is_regex: { description: 'Optional. Default is false. Whether the query is a regex.' },
 			...paginationParam,
 		},
@@ -269,11 +267,19 @@ export const builtinTools: {
 
 	// --- editing (create/delete) ---
 
-	create_file_or_folder: {
-		name: 'create_file_or_folder',
-		description: `Create a file or folder at the given path. To create a folder, the path MUST end with a trailing slash.`,
+	create_file: {
+		name: 'create_file',
+		description: `Create a new file at the given path. Do NOT use this tool to create folders.`,
 		params: {
-			...uriParam('file or folder'),
+			...uriParam('file'),
+		},
+	},
+
+	create_folder: {
+		name: 'create_folder',
+		description: `Create a new folder at the given path. Do NOT use this tool to create files.`,
+		params: {
+			...uriParam('folder'),
 		},
 	},
 

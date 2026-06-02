@@ -11,6 +11,7 @@ import { ILLMMessageService } from '../common/sendLLMMessageService.js'
 import { IVoidSettingsService } from '../common/voidSettingsService.js'
 import { IConvertToLLMMessageService } from './convertToLLMMessageService.js'
 import { IDirectoryStrService } from '../common/directoryStrService.js'
+import { IWorkspaceContextService } from '../../../../platform/workspace/common/workspace.js'
 import { IMemoryStore } from '../common/memoryStore.js'
 import {
 	AgentPlan, AgentTask, DEFAULT_PIPELINE_STATE,
@@ -19,12 +20,13 @@ import {
 import {
 	PROMPT_REFINER_SYSTEM, TASK_GENERATOR_SYSTEM,
 	buildPromptRefinerUserMessage, buildTaskGeneratorUserMessage,
-	buildTaskExecutionPrompt,
+	buildTaskExecutionPrompt, AUTONOMOUS_EXECUTION_SYSTEM_PROMPT,
 	REPLAN_SYSTEM_PROMPT, buildReplanUserMessage,
-	
+	TASK_MEMORY_EXTRACTOR_SYSTEM,
 } from '../common/agentPromptTemplates.js'
 import { autoSplitOversizedTasks } from '../common/planExportImport.js'
 import { ModelSelection, ProviderName } from '../common/voidSettingsTypes.js'
+import { IDialogService } from '../../../../platform/dialogs/common/dialogs.js'
 
 import { IChatThreadService } from './chatThreadServiceInterface.js'
 
@@ -75,9 +77,11 @@ class AgentPipelineService extends Disposable implements IAgentPipelineService {
 		@IVoidSettingsService private readonly _settingsService: IVoidSettingsService,
 		@IConvertToLLMMessageService private readonly _convertToLLMMessagesService: IConvertToLLMMessageService,
 		@IDirectoryStrService private readonly _directoryStrService: IDirectoryStrService,
+		@IWorkspaceContextService private readonly _workspaceContextService: IWorkspaceContextService,
 		
 		@IMemoryStore private readonly _memoryStore: IMemoryStore,
 		@IChatThreadService private readonly _chatThreadService: IChatThreadService,
+		@IDialogService private readonly _dialogService: IDialogService,
 	) {
 		super()
 	}
@@ -138,17 +142,47 @@ class AgentPipelineService extends Disposable implements IAgentPipelineService {
 	// ======================== Pipeline Entry Point ========================
 
 	async startPipeline(userPrompt: string): Promise<void> {
+		let clearOldPlan = true
+
+		if (this.state.currentPlan && this.state.currentPlan.tasks.length > 0) {
+			const hasPendingTasks = this.state.currentPlan.tasks.some(t => t.status !== 'done')
+			if (hasPendingTasks) {
+				const res = await this._dialogService.prompt<'add' | 'clear' | 'cancel'>({
+					type: 'question',
+					message: 'You have unfinished tasks from a previous prompt.',
+					detail: 'Would you like to add the current task to the previous plan, or clear old tasks?',
+					buttons: [
+						{ label: 'Add to old plan', run: () => 'add' },
+						{ label: 'Clear old plan', run: () => 'clear' }
+					],
+					cancelButton: { label: 'Cancel', run: () => 'cancel' }
+				})
+
+				if (res.result === 'cancel' || res.result === undefined) {
+					return
+				}
+				clearOldPlan = res.result === 'clear'
+			}
+		}
+
 		// Load memory at the start
 		await this._memoryStore.load()
 
-		this._setState({
-			...DEFAULT_PIPELINE_STATE,
-			phase: 'planning',
-			originalPrompt: userPrompt,
-		})
+		if (clearOldPlan) {
+			this._setState({
+				...DEFAULT_PIPELINE_STATE,
+				phase: 'planning',
+				originalPrompt: userPrompt,
+			})
+		} else {
+			this._setState({
+				phase: 'planning',
+				originalPrompt: this.state.originalPrompt + '\n\nAdditional Request: ' + userPrompt,
+			})
+		}
 
 		try {
-			await this._runPlanningPhase(userPrompt)
+			await this._runPlanningPhase(userPrompt, !clearOldPlan)
 		} catch (error) {
 			const message = error instanceof Error ? error.message : String(error)
 			this._setState({ phase: 'idle', error: `Planning failed: ${message}` })
@@ -157,7 +191,7 @@ class AgentPipelineService extends Disposable implements IAgentPipelineService {
 
 	// ======================== Phase 1: Planning ========================
 
-	private async _runPlanningPhase(userPrompt: string): Promise<void> {
+	private async _runPlanningPhase(userPrompt: string, isAppending: boolean = false): Promise<void> {
 		const modelSelection = this.getPlanningModelSelection()
 		if (!modelSelection) {
 			this._setState({ phase: 'idle', error: 'No model selected. Please configure a model in Void Settings.' })
@@ -198,13 +232,19 @@ class AgentPipelineService extends Disposable implements IAgentPipelineService {
 
 
 		// Update memory with project info
-		await this._memoryStore.updateProjectInfo(projectSummary, techStack)
+		const memory = this._memoryStore.getMemory()
+		const newProjectSummary = projectSummary || memory.projectSummary
+		const newTechStack = Array.from(new Set([...(memory.techStack || []), ...techStack]))
+		await this._memoryStore.updateProjectInfo(newProjectSummary, newTechStack)
+
+		const existingTasks = isAppending && this.state.currentPlan ? this.state.currentPlan.tasks : []
+		const existingTasksStr = existingTasks.map((t, i) => `${i + 1}. [${t.status}] ${t.title} - ${t.description}`).join('\n')
 
 		// Step 2: Generate task list
 		this._setState({ executionLog: 'Generating task list...' })
 		const taskResult = await this._callLLMForJSON(
 			TASK_GENERATOR_SYSTEM,
-			buildTaskGeneratorUserMessage(refinedPrompt, projectSummary, techStack, directoryStr),
+			buildTaskGeneratorUserMessage(refinedPrompt, newProjectSummary, newTechStack, directoryStr, existingTasksStr),
 			modelSelection,
 		)
 
@@ -254,7 +294,7 @@ class AgentPipelineService extends Disposable implements IAgentPipelineService {
 			refinedPrompt,
 			projectSummary,
 			techStack,
-			tasks,
+			tasks: [...existingTasks, ...tasks],
 			createdAt: Date.now(),
 			lastModified: Date.now(),
 		}
@@ -302,8 +342,12 @@ class AgentPipelineService extends Disposable implements IAgentPipelineService {
 		const failureCountOfTaskId = new Map<string, number>()
 		let totalReplanAttempts = 0
 
-		// Use a while loop because we may restart execution after replanning
-		while (true) {
+		this._chatThreadService.setChatModeOverride('agent')
+		this._chatThreadService.setPipelineAutoApprove(true)
+
+		try {
+			// Use a while loop because we may restart execution after replanning
+			while (true) {
 			if (this._isPaused) {
 				const currentIdx = plan.tasks.findIndex(t => t.status === 'pending' || t.status === 'running')
 				this._setState({ phase: 'paused', currentTaskIndex: Math.max(0, currentIdx) })
@@ -345,11 +389,18 @@ class AgentPipelineService extends Disposable implements IAgentPipelineService {
 			const memoryContext = this._memoryStore.buildContextString(task)
 			const executionPrompt = buildTaskExecutionPrompt(task, plan, memoryContext)
 
+			// Get the workspace root
+			const workspaceFolders = this._workspaceContextService.getWorkspace().folders
+			const workspaceRootMsg = workspaceFolders.length > 0 
+				? `Your root workspace directory is: ${workspaceFolders[0].uri.fsPath}\nUse this as the cwd for all terminal commands unless instructed otherwise.` 
+				: 'No workspace folder is open.'
+
 			// Execute the task by sending to the chat thread service as a user message
+			// Prefix with __PIPELINE_HIDDEN__ so the UI can hide this from display
 			try {
 				const threadId = this._chatThreadService.state.currentThreadId
 				await this._chatThreadService.addUserMessageAndStreamResponse({
-					userMessage: executionPrompt, // don't send TASK_EXECUTION_SYSTEM here, it's sent as a system message in prepareLLMSimpleMessages later (Wait, addUserMessageAndStreamResponse sends it as a user message! Need to fix this!)
+					userMessage: `__PIPELINE_HIDDEN__\n${AUTONOMOUS_EXECUTION_SYSTEM_PROMPT}\n\n${workspaceRootMsg}\n\n${executionPrompt}`,
 					threadId,
 				})
 
@@ -362,8 +413,14 @@ class AgentPipelineService extends Disposable implements IAgentPipelineService {
 				}
 				this._updatePlanTasks(plan)
 
+				let recentLog = `Completed: ${task.title}`;
+				const thread = this._chatThreadService.state.allThreads[threadId];
+				if (thread && thread.messages) {
+					recentLog = JSON.stringify(thread.messages.slice(-5));
+				}
+
 				// Extract and store memory
-				await this._extractMemory(task, `Completed: ${task.title}`)
+				await this._extractMemory(task, recentLog)
 
 			} catch (error) {
 				const errorMsg = error instanceof Error ? error.message : String(error)
@@ -407,6 +464,10 @@ class AgentPipelineService extends Disposable implements IAgentPipelineService {
 					// loop will retry the same task since it's the first pending
 				}
 			}
+		} // end while(true)
+		} finally {
+			this._chatThreadService.setChatModeOverride(null)
+			this._chatThreadService.setPipelineAutoApprove(false)
 		}
 
 		this._setPhase('done')
@@ -502,10 +563,19 @@ class AgentPipelineService extends Disposable implements IAgentPipelineService {
 	// ======================== Memory Extraction ========================
 
 	private async _extractMemory(task: AgentTask, taskResult: string): Promise<void> {
-		// Simple memory: just record what was done without calling LLM
-		// (LLM-based extraction is expensive for small models; do it simply)
+		const modelSelection = this.getPlanningModelSelection()
+		let summaryText = `${task.title}: ${task.description.slice(0, 100)}`
+		
+		if (modelSelection) {
+			const prompt = `TASK: ${task.title}\nDESCRIPTION: ${task.description}\n\nEXECUTION LOG:\n${taskResult.slice(-2000)}\n\nExtract the side-effects of this task as instructed.`
+			const result = await this._callLLMForJSON(TASK_MEMORY_EXTRACTOR_SYSTEM, prompt, modelSelection)
+			if (result) {
+				summaryText = result.trim()
+			}
+		}
+
 		await this._memoryStore.addEntry({
-			text: `${task.title}: ${task.description.slice(0, 100)}`,
+			text: summaryText,
 			type: task.taskType === 'create' ? 'file_created' : 'fix',
 			taskId: task.id,
 		})
