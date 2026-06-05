@@ -406,6 +406,15 @@ class AgentPipelineService extends Disposable implements IAgentPipelineService {
 
 				await this._waitForStreamComplete(threadId)
 
+				if (this._isPaused) {
+					plan = {
+						...plan,
+						tasks: plan.tasks.map((t: AgentTask): AgentTask => t.id === task.id ? { ...t, status: 'pending' } : t)
+					}
+					this._updatePlanTasks(plan)
+					break
+				}
+
 				// Mark done
 				plan = {
 					...plan,
@@ -470,7 +479,9 @@ class AgentPipelineService extends Disposable implements IAgentPipelineService {
 			this._chatThreadService.setPipelineAutoApprove(false)
 		}
 
-		this._setPhase('done')
+		if (!this._isPaused) {
+			this._setPhase('done')
+		}
 	}
 
 	/**

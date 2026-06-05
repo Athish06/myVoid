@@ -1261,7 +1261,7 @@ We only need to do it for files that were edited since `from`, ie files between 
 	getRelativeStr = (uri: URI) => {
 		const isInside = this._workspaceContextService.isInsideWorkspace(uri)
 		if (isInside) {
-			const f = this._workspaceContextService.getWorkspace().folders.find(f => uri.fsPath.startsWith(f.uri.fsPath))
+			const f = this._workspaceContextService?.getWorkspace?.()?.folders?.find(f => uri.fsPath.startsWith(f.uri.fsPath))
 			if (f) { return uri.fsPath.replace(f.uri.fsPath, '') }
 			else { return undefined }
 		}

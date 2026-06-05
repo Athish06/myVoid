@@ -40,7 +40,15 @@ const validateStr = (argName: string, value: unknown) => {
 
 // We are NOT checking to make sure in workspace
 const validateURI = (uriStr: unknown, workspaceContextService: IWorkspaceContextService) => {
-	if (uriStr === null) throw new Error(`Invalid LLM output: uri was null.`)
+	const folders = workspaceContextService?.getWorkspace?.()?.folders || [];
+	
+	if (isFalsy(uriStr)) {
+		if (folders.length > 0) {
+			return folders[0].uri;
+		}
+		throw new Error(`Invalid LLM output: uri was missing or null.`)
+	}
+
 	if (typeof uriStr !== 'string') throw new Error(`Invalid LLM output format: Provided uri must be a string, but it's a(n) ${typeof uriStr}. Full value: ${JSON.stringify(uriStr)}.`)
 
 	// Check if it's already a full URI with scheme (e.g., vscode-remote://, file://, etc.)
@@ -52,7 +60,6 @@ const validateURI = (uriStr: unknown, workspaceContextService: IWorkspaceContext
 		}
 	}
 
-	const folders = workspaceContextService.getWorkspace().folders;
 	if (folders.length > 0) {
 		const workspaceRoot = folders[0].uri;
 		const fsPath = workspaceRoot.fsPath;
@@ -277,7 +284,13 @@ export class ToolsService implements IToolsService {
 			run_command: (params: RawToolParamsObj) => {
 				const { command: commandUnknown, cwd: cwdUnknown } = params
 				const command = validateStr('command', commandUnknown)
-				const cwd = validateOptionalStr('cwd', cwdUnknown)
+				let cwd = validateOptionalStr('cwd', cwdUnknown)
+				if (!cwd) {
+					const folders = this.workspaceContextService?.getWorkspace?.()?.folders || [];
+					if (folders.length > 0) {
+						cwd = folders[0].uri.fsPath;
+					}
+				}
 				const terminalId = generateUuid()
 				return { command, cwd, terminalId }
 			},
@@ -289,8 +302,13 @@ export class ToolsService implements IToolsService {
 			},
 			open_persistent_terminal: (params: RawToolParamsObj) => {
 				const { cwd: cwdUnknown } = params;
-				const cwd = validateOptionalStr('cwd', cwdUnknown)
-				// No parameters needed; will open a new background terminal
+				let cwd = validateOptionalStr('cwd', cwdUnknown)
+				if (!cwd) {
+					const folders = this.workspaceContextService?.getWorkspace?.()?.folders || [];
+					if (folders.length > 0) {
+						cwd = folders[0].uri.fsPath;
+					}
+				}
 				return { cwd };
 			},
 			kill_persistent_terminal: (params: RawToolParamsObj) => {
@@ -340,7 +358,7 @@ export class ToolsService implements IToolsService {
 
 			search_pathnames_only: async ({ query: queryStr, includePattern, pageNumber }) => {
 
-				const query = queryBuilder.file(workspaceContextService.getWorkspace().folders.map(f => f.uri), {
+				const query = queryBuilder.file(workspaceContextService?.getWorkspace?.()?.folders?.map(f => f.uri) || [], {
 					filePattern: queryStr,
 					includePattern: includePattern ?? undefined,
 					sortByScore: true, // makes results 10x better
@@ -359,7 +377,7 @@ export class ToolsService implements IToolsService {
 
 			search_for_files: async ({ query: queryStr, isRegex, searchInFolder, pageNumber }) => {
 				const searchFolders = searchInFolder === null ?
-					workspaceContextService.getWorkspace().folders.map(f => f.uri)
+					(workspaceContextService?.getWorkspace?.()?.folders?.map(f => f.uri) || [])
 					: [searchInFolder]
 
 				const query = queryBuilder.text({

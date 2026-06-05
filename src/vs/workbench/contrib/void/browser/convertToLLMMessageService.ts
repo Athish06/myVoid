@@ -548,7 +548,7 @@ class ConvertToLLMMessageService extends Disposable implements IConvertToLLMMess
 	// Read .voidrules files from workspace folders
 	private _getVoidRulesFileContents(): string {
 		try {
-			const workspaceFolders = this.workspaceContextService.getWorkspace().folders;
+			const workspaceFolders = this.workspaceContextService?.getWorkspace?.()?.folders || [];
 			let voidRules = '';
 			for (const folder of workspaceFolders) {
 				const uri = URI.joinPath(folder.uri, '.voidrules')
@@ -577,7 +577,7 @@ class ConvertToLLMMessageService extends Disposable implements IConvertToLLMMess
 
 	// system message
 	private _generateChatMessagesSystemMessage = async (chatMode: ChatMode, specialToolFormat: 'openai-style' | 'anthropic-style' | 'gemini-style' | undefined) => {
-		const workspaceFolders = this.workspaceContextService.getWorkspace().folders.map(f => f.uri.fsPath)
+		const workspaceFolders = this.workspaceContextService?.getWorkspace?.()?.folders?.map(f => f.uri.fsPath) || []
 
 		const openedURIs = this.modelService.getModels().filter(m => m.isAttachedToEditor()).map(m => m.uri.fsPath) || [];
 		const activeURI = this.editorService.activeEditor?.resource?.fsPath;

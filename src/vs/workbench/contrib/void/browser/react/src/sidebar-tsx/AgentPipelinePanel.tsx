@@ -369,11 +369,11 @@ const TaskEditorItem = ({
 					<div className="text-xs font-medium text-void-fg-1 truncate flex items-center gap-2">
 						<span className="text-void-fg-4 font-mono">{index + 1}.</span> {task.title}
 					</div>
-					<div className="flex gap-1 opacity-0 group-hover:opacity-100 transition-opacity">
-                        {!isFirst && <button onClick={() => onMove('up')} className="text-void-fg-3 hover:text-void-fg-1 p-0.5"><ChevronUp size={10} /></button>}
-                        {!isLast && <button onClick={() => onMove('down')} className="text-void-fg-3 hover:text-void-fg-1 p-0.5"><ChevronDown size={10} /></button>}
-						<button onClick={() => setIsEditing(true)} className="text-void-fg-3 hover:text-void-fg-1 p-0.5 ml-1"><Pencil size={10} /></button>
-						<button onClick={onDelete} className="text-void-fg-3 hover:text-void-error p-0.5"><Trash2 size={10} /></button>
+					<div className="flex gap-1 text-void-fg-3">
+                        {!isFirst && <button onClick={() => onMove('up')} className="hover:text-void-fg-1 p-0.5 bg-void-bg-2 rounded border border-void-border-3" title="Move Up"><ChevronUp size={12} /></button>}
+                        {!isLast && <button onClick={() => onMove('down')} className="hover:text-void-fg-1 p-0.5 bg-void-bg-2 rounded border border-void-border-3" title="Move Down"><ChevronDown size={12} /></button>}
+						<button onClick={() => setIsEditing(true)} className="hover:text-void-fg-1 p-0.5 ml-2"><Pencil size={12} /></button>
+						<button onClick={onDelete} className="hover:text-void-error p-0.5"><Trash2 size={12} /></button>
 					</div>
 				</div>
 				<div className="text-[10px] text-void-fg-3 truncate">{task.description}</div>
