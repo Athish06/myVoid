@@ -1152,11 +1152,11 @@ We only need to do it for files that were edited since `from`, ie files between 
 		}
 
 		// add dummy before this message to keep checkpoint before user message idea consistent
-		if (this.state.allThreads[threadId].messages.length === 0) {
+		if (!this.state.allThreads[threadId] || this.state.allThreads[threadId].messages.length === 0) {
 			this._addUserCheckpoint({ threadId })
 		}
 
-		const currSelns: StagingSelectionItem[] = this.state.allThreads[threadId].state.stagingSelections
+		const currSelns: StagingSelectionItem[] = this.state.allThreads[threadId]?.state.stagingSelections || []
 		const userMessageContent = await chat_userMessageContent(userMessage, currSelns, { directoryStrService: this._directoryStringService, fileService: this._fileService }) // user message + names of files (NOT content)
 		const userHistoryElt: ChatMessage = { role: 'user', content: userMessageContent, displayContent: userMessage, selections: currSelns, state: defaultMessageState }
 		

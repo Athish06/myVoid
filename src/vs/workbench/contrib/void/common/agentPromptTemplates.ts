@@ -87,23 +87,28 @@ Rules:
  * Builds the user message for task generation.
  */
 export function buildTaskGeneratorUserMessage(
-	refinedPrompt: string,
+	userPrompt: string,
 	projectSummary: string,
 	techStack: string[],
-	directoryStr: string,
-	existingTasksStr: string = ''
+	workspaceContext: string,
+	existingTasksStr: string,
+	taskHistoryStr: string = ''
 ): string {
+	const currentPlanInfo = existingTasksStr ? `\nCURRENT PLAN IN PROGRESS:\n${existingTasksStr}` : ''
+	const historyInfo = taskHistoryStr ? `\nPAST COMPLETED TASKS (Context):\n${taskHistoryStr}` : ''
+
 	return `\
-REFINED SPECIFICATION:
-${refinedPrompt}
+USER REQUEST:
+${userPrompt}
 
-PROJECT: ${projectSummary}
-STACK: ${techStack.join(', ')}
+PROJECT SUMMARY: ${projectSummary || 'Unknown'}
+TECH STACK: ${techStack.length ? techStack.join(', ') : 'Unknown'}
 
-FILE STRUCTURE:
-${directoryStr}
+WORKSPACE CONTEXT:
+${workspaceContext}
+${historyInfo}${currentPlanInfo}
 
-${existingTasksStr ? `PREVIOUS TASKS (DO NOT DUPLICATE THESE):\n${existingTasksStr}\n\nGenerate ONLY new tasks to append to this list. Break this down into ordered, atomic coding tasks.` : 'Break this down into ordered, atomic coding tasks. Output JSON only.'}`
+Generate the task list. Output JSON only.`
 }
 
 
@@ -129,23 +134,31 @@ CRITICAL: YOU ARE IN AUTONOMOUS MODE. Follow these rules STRICTLY:
 == TERMINAL COMMANDS ==
 7. EXTREMELY IMPORTANT: You MUST NEVER output terminal commands in Markdown \\\`\\\`\\\`bash blocks. 
 8. You MUST ALWAYS use the XML tool \`<run_command>\` to execute commands.
-9. ALWAYS provide the correct absolute working directory in the \`<cwd>\` parameter. NEVER omit it and NEVER assume the user is in the correct directory.
-10. After running a command, WAIT for it to complete. Carefully check the terminal output. 
-11. IF A COMMAND FAILS: You MUST rectify the command. Analyze the reason for failure (e.g. wrong path, missing dependency, syntax error) and execute a new \`run_command\` tool call to fix it. DO NOT proceed to the next task until the current command succeeds!
+9. When using the \`<run_command>\` tool, ALWAYS provide the correct absolute working directory in its \`<cwd>\` parameter. Do NOT wrap paths for other tools in <cwd> tags.
+10. NEVER use \`<run_command>\` to execute \`ls_dir\`, \`get_dir_tree\`, or \`read_file\`. Those are XML tags, NOT Powershell commands! If you want to list a directory, you MUST output the raw XML: \`<ls_dir><uri>C:\\path</uri></ls_dir>\`.
+11. After running a command, WAIT for it to complete. Carefully check the terminal output. 
+12. IF A COMMAND FAILS: You MUST rectify the command. Analyze the reason for failure (e.g. wrong path, missing dependency, syntax error) and execute a new \`run_command\` tool call to fix it. DO NOT proceed to the next task until the current command succeeds!
 
 == EXECUTION BEHAVIOR ==
-12. Complete ONE task fully. Do not produce partial work.
-13. The IDE renders diffs automatically. Do not describe your changes in text.
-14. Do not ask the user for confirmation — the IDE approval system handles pauses.
-15. If a task cannot be completed with available tools, state why in plain text only.
-16. Do not output any explanatory text unless there is an error. Just execute with tools.
-17. NEVER wrap your tool calls in Markdown code blocks (e.g., \`\`\`json or \`\`\`xml). Just output the raw tool XML tags directly.
-18. EXTREMELY IMPORTANT: NEVER use XML attributes in your tool tags (e.g., <rewrite_file file_path="..."> is STRICTLY FORBIDDEN). You MUST use nested tags for all parameters exactly as defined in the Format section (e.g., <rewrite_file><uri>...</uri></rewrite_file>).
-19. When providing a file path parameter, ALWAYS use the exact tag name \`<uri>\`. NEVER use \`<file_path>\`, \`<path>\`, or any other variation.
-20. When closing an XML tag, ALWAYS use a forward slash (e.g. \`</uri>\`). NEVER use a backslash (e.g. \`<\\\\uri>\` is STRICTLY FORBIDDEN).
-21. IMPORTANT: When creating a FOLDER, you MUST use the \`create_folder\` tool. When creating a FILE, you MUST use the \`create_file\` tool. Do not confuse them!
-22. NEVER invent your own tools or tags (e.g., <execute_command>). You must use the exact tool names provided (e.g. <run_command>).
-23. If you need to change directory, do NOT use \`cd\` as a separate command. Pass the absolute directory path to the \`cwd\` parameter of \`run_command\` instead.
+13. Complete ONE task fully. Do not produce partial work.
+14. The IDE renders diffs automatically. Do not describe your changes in text.
+15. Do not ask the user for confirmation — the IDE approval system handles pauses.
+16. If a task cannot be completed with available tools, state why in plain text only.
+17. Do not output any explanatory text unless there is an error. Just execute with tools.
+18. NEVER wrap your tool calls in Markdown code blocks (e.g., \`\`\`json or \`\`\`xml). Just output the raw tool XML tags directly.
+19. EXTREMELY IMPORTANT: NEVER use XML attributes in your tool tags (e.g., <rewrite_file file_path="..."> is STRICTLY FORBIDDEN). You MUST use nested tags for all parameters exactly as defined in the Format section (e.g., <rewrite_file><uri>...</uri></rewrite_file>).
+20. When providing a file path parameter, ALWAYS use the exact tag name \`<uri>\`. NEVER use \`<file_path>\`, \`<path>\`, or any other variation.
+21. When closing an XML tag, ALWAYS use a forward slash (e.g. \`</uri>\`). NEVER use a backslash (e.g. \`<\\\\uri>\` is STRICTLY FORBIDDEN).
+22. IMPORTANT: When creating a FOLDER, you MUST use the \`create_folder\` tool. When creating a FILE, you MUST use the \`create_file\` tool. Do not confuse them!
+23. NEVER invent your own tools or tags (e.g., <execute_command>). You must use the exact tool names provided (e.g. <run_command>).
+24. If you need to change directory, do NOT use \`cd\` as a separate command. Pass the absolute directory path to the \`cwd\` parameter of \`run_command\` instead.
+
+== ASKING QUESTIONS (PAUSING PIPELINE) ==
+If you need clarification from the user (e.g., which framework, design preference, or missing info):
+- Output: AGENT_QUESTION: Your question here
+- The pipeline will PAUSE and show this question to the user in a popup.
+- You will receive the user's answer in the next message.
+- Only ask questions when genuinely uncertain. Do not ask unnecessary questions.
 
 == APPROVAL SYSTEM (you cannot bypass this) ==
 - ALL FILE EDITS AND CREATIONS are completely AUTOMATED. They will apply instantly without asking the user.

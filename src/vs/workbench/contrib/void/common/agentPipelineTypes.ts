@@ -41,10 +41,20 @@ export interface MemoryEntry {
 	timestamp: number
 }
 
+export interface TaskHistoryEntry {
+	taskId: string
+	title: string
+	description: string
+	status: TaskStatus
+	result?: string
+	timestamp: number
+}
+
 export interface ProjectMemory {
 	projectSummary: string
 	techStack: string[]
 	entries: MemoryEntry[]
+	taskHistory: TaskHistoryEntry[]
 	fileIndex: Record<string, string>  // filename → one-line description
 	lastUpdated: number
 }
@@ -80,6 +90,7 @@ export type PipelinePhase =
 	| 'planning'
 	| 'plan_review'
 	| 'executing'
+	| 'awaiting_feedback'
 	| 'paused'
 	| 'done'
 
@@ -90,6 +101,8 @@ export interface PipelineState {
 	executionLog: string            // streaming token output for the current task
 	error: string | null            // pipeline-level error (not per-task)
 	originalPrompt: string          // the raw user prompt before refinement
+	pendingQuestion: string | null  // if phase is 'awaiting_feedback'
+	feedbackAnswer: string | null   // storing answer briefly if needed
 }
 
 export const DEFAULT_PIPELINE_STATE: PipelineState = {
@@ -99,6 +112,8 @@ export const DEFAULT_PIPELINE_STATE: PipelineState = {
 	executionLog: '',
 	error: null,
 	originalPrompt: '',
+	pendingQuestion: null,
+	feedbackAnswer: null,
 }
 
 // ======================== Plan Import ========================

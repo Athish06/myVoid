@@ -184,9 +184,12 @@ function normalizeToolParams(toolName: string, params: RawToolParamsObj): void {
 		}
 	}
 
-	// === Clean URI values: strip quotes, backticks ===
+	// === Clean URI values: strip quotes, backticks, and any rogue <cwd> tags ===
 	if (typeof params.uri === 'string') {
-		params.uri = params.uri.replace(/^["`']+|["`']+$/g, '').trim()
+		params.uri = params.uri
+			.replace(/^["`']+|["`']+$/g, '')
+			.replace(/<cwd>|<\/cwd>|<\\cwd>/gi, '')
+			.trim()
 	}
 
 	// === run_command: arguments/args → command ===
@@ -204,6 +207,11 @@ function normalizeToolParams(toolName: string, params: RawToolParamsObj): void {
 		// Clean command value
 		if (typeof params.command === 'string') {
 			params.command = params.command.replace(/^["`']+|["`']+$/g, '').trim()
+		}
+
+		// Clean cwd value of rogue tags
+		if (typeof params.cwd === 'string') {
+			params.cwd = params.cwd.replace(/<cwd>|<\/cwd>|<\\cwd>/gi, '').replace(/^["`']+|["`']+$/g, '').trim()
 		}
 	}
 

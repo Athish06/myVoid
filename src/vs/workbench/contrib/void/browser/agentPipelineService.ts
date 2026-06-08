@@ -51,6 +51,9 @@ export interface IAgentPipelineService {
 	resumePipeline(): Promise<void>
 	cancelPipeline(): void
 
+	// Feedback loop
+	submitFeedback(answer: string): Promise<void>
+
 	// Get the model selection for a given phase
 	getPlanningModelSelection(): ModelSelection | null
 	getExecutionModelSelection(): ModelSelection | null
@@ -165,6 +168,10 @@ class AgentPipelineService extends Disposable implements IAgentPipelineService {
 			}
 		}
 
+		if (clearOldPlan && this.state.currentPlan && this.state.currentPlan.tasks.length > 0) {
+			await this._memoryStore.archiveCompletedTasks(this.state.currentPlan.tasks)
+		}
+
 		// Load memory at the start
 		await this._memoryStore.load()
 
@@ -274,6 +281,9 @@ class AgentPipelineService extends Disposable implements IAgentPipelineService {
 
 		const existingTasks = isAppending && this.state.currentPlan ? this.state.currentPlan.tasks : []
 		const existingTasksStr = existingTasks.map((t, i) => `${i + 1}. [${t.status}] ${t.title} - ${t.description}`).join('\n')
+		
+		const taskHistory = this._memoryStore.getTaskHistory()
+		const taskHistoryStr = taskHistory.map((t, i) => `${i + 1}. [${t.status}] ${t.title}${t.result ? ` - ${t.result}` : ''}`).join('\n')
 		let tasks: AgentTask[]
 
 		// Helper to build rich fallback description
@@ -297,7 +307,7 @@ class AgentPipelineService extends Disposable implements IAgentPipelineService {
 			this._setState({ executionLog: 'Generating task list...' })
 			const taskResult = await this._callLLMForJSON(
 				TASK_GENERATOR_SYSTEM,
-				buildTaskGeneratorUserMessage(refinedPrompt, newProjectSummary, newTechStack, directoryStr, existingTasksStr),
+				buildTaskGeneratorUserMessage(refinedPrompt, newProjectSummary, newTechStack, directoryStr, existingTasksStr, taskHistoryStr),
 				modelSelection,
 			)
 
@@ -451,20 +461,46 @@ class AgentPipelineService extends Disposable implements IAgentPipelineService {
 			// Prefix with __PIPELINE_HIDDEN__ so the UI can hide this from display
 			try {
 				const threadId = this._chatThreadService.state.currentThreadId
-				await this._chatThreadService.addUserMessageAndStreamResponse({
-					userMessage: `__PIPELINE_HIDDEN__\n${AUTONOMOUS_EXECUTION_SYSTEM_PROMPT}\n\n${workspaceRootMsg}\n\n${executionPrompt}`,
-					threadId,
-				})
+				
+				if (this.state.feedbackAnswer !== null) {
+					const answer = this.state.feedbackAnswer
+					this._setState({ feedbackAnswer: null })
+					await this._chatThreadService.addUserMessageAndStreamResponse({
+						userMessage: `USER FEEDBACK:\n${answer}\n\nPlease proceed with the task.`,
+						threadId,
+					})
+				} else {
+					await this._chatThreadService.addUserMessageAndStreamResponse({
+						userMessage: `__PIPELINE_HIDDEN__\n${AUTONOMOUS_EXECUTION_SYSTEM_PROMPT}\n\n${workspaceRootMsg}\n\n${executionPrompt}`,
+						threadId,
+					})
+				}
 
 				await this._waitForStreamComplete(threadId)
 
-				if (this._isPaused) {
+				if (this._isPaused && this.state.phase !== 'awaiting_feedback') {
 					plan = {
 						...plan,
 						tasks: plan.tasks.map((t: AgentTask): AgentTask => t.id === task.id ? { ...t, status: 'pending' } : t)
 					}
 					this._updatePlanTasks(plan)
 					break
+				}
+
+				// Check if the agent asked a question
+				const thread = this._chatThreadService.state.allThreads[threadId]
+				const lastMsg = [...(thread?.messages || [])].reverse().find(m => m.role === 'assistant')
+				if (lastMsg && /AGENT_QUESTION:/i.test(lastMsg.displayContent || '')) {
+					const questionMatch = lastMsg.displayContent!.match(/AGENT_QUESTION:\s*(.*)/i)
+					if (questionMatch) {
+						this._setState({ 
+							phase: 'awaiting_feedback', 
+							pendingQuestion: questionMatch[1].trim(),
+							currentTaskIndex: taskIndex 
+						})
+						this._isPaused = true
+						return // Pause and wait for user to call submitFeedback
+					}
 				}
 
 				// Mark done
@@ -475,7 +511,6 @@ class AgentPipelineService extends Disposable implements IAgentPipelineService {
 				this._updatePlanTasks(plan)
 
 				let recentLog = `Completed: ${task.title}`;
-				const thread = this._chatThreadService.state.allThreads[threadId];
 				if (thread && thread.messages) {
 					recentLog = JSON.stringify(thread.messages.slice(-5));
 				}
@@ -683,6 +718,18 @@ class AgentPipelineService extends Disposable implements IAgentPipelineService {
 		if (this.state.phase !== 'paused' || !this.state.currentPlan) return
 		this._isPaused = false
 		this._setPhase('executing')
+		try {
+			await this._runExecutionPhase()
+		} catch (error) {
+			const message = error instanceof Error ? error.message : String(error)
+			this._setState({ error: `Execution error: ${message}` })
+		}
+	}
+
+	async submitFeedback(answer: string): Promise<void> {
+		if (this.state.phase !== 'awaiting_feedback' || !this.state.currentPlan) return
+		this._setState({ feedbackAnswer: answer, phase: 'executing', pendingQuestion: null })
+		this._isPaused = false
 		try {
 			await this._runExecutionPhase()
 		} catch (error) {

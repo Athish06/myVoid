@@ -10,7 +10,7 @@ import { createDecorator } from '../../../../platform/instantiation/common/insta
 import { IFileService } from '../../../../platform/files/common/files.js'
 import { IWorkspaceContextService } from '../../../../platform/workspace/common/workspace.js'
 import { VSBuffer } from '../../../../base/common/buffer.js'
-import { AgentTask, MemoryEntry, ProjectMemory } from './agentPipelineTypes.js'
+import { AgentTask, MemoryEntry, ProjectMemory, TaskHistoryEntry } from './agentPipelineTypes.js'
 
 const MEMORY_DIR = '.void'
 const MEMORY_FILE = 'memory.json'
@@ -27,6 +27,8 @@ export interface IMemoryStore {
 	addEntry(entry: Omit<MemoryEntry, 'id' | 'timestamp'>): Promise<void>
 	updateProjectInfo(summary: string, techStack: string[]): Promise<void>
 	updateFileIndex(updates: Record<string, string>): Promise<void>
+	getTaskHistory(): TaskHistoryEntry[]
+	archiveCompletedTasks(tasks: AgentTask[]): Promise<void>
 	buildContextString(taskContext: AgentTask, maxTokens?: number): string
 	clearMemory(): Promise<void>
 }
@@ -40,6 +42,7 @@ function createEmptyMemory(): ProjectMemory {
 		projectSummary: '',
 		techStack: [],
 		entries: [],
+		taskHistory: [],
 		fileIndex: {},
 		lastUpdated: Date.now(),
 	}
@@ -139,6 +142,28 @@ export class MemoryStore extends Disposable implements IMemoryStore {
 		await this.save()
 	}
 
+	getTaskHistory(): TaskHistoryEntry[] {
+		return this.memory.taskHistory || []
+	}
+
+	async archiveCompletedTasks(tasks: AgentTask[]): Promise<void> {
+		const completed = tasks.filter(t => t.status === 'done' || t.status === 'failed')
+		if (completed.length === 0) return
+
+		const newEntries: TaskHistoryEntry[] = completed.map(t => ({
+			taskId: t.id,
+			title: t.title,
+			description: t.description.length > 200 ? t.description.slice(0, 200) + '...' : t.description,
+			status: t.status,
+			result: t.result || t.error,
+			timestamp: Date.now(),
+		}))
+
+		this.memory.taskHistory = [...(this.memory.taskHistory || []), ...newEntries]
+		this._cleanMemory()
+		await this.save()
+	}
+
 	/**
 	 * Builds a context string from memory, tailored for the current task.
 	 * Type-aware selection: always includes decisions/architecture,
@@ -173,13 +198,21 @@ export class MemoryStore extends Disposable implements IMemoryStore {
 			parts.push(`RELEVANT FILES:\n${relevantFiles.join('\n')}`)
 		}
 
-		// Recent completed work (last 4 only):
+		// Recent completed work from this plan (last 4 only):
 		const recentWork = memory.entries
 			.filter(e => e.type === 'file_created' || e.type === 'fix')
 			.slice(-4)
 			.map(e => `[done] ${e.text}`)
 		if (recentWork.length) {
-			parts.push(`RECENT WORK:\n${recentWork.join('\n')}`)
+			parts.push(`RECENT WORK (This Session):\n${recentWork.join('\n')}`)
+		}
+
+		// Historical tasks from past plans:
+		const history = (memory.taskHistory || [])
+			.slice(-5)
+			.map(t => `[${t.status}] ${t.title}${t.result ? ` - ${t.result}` : ''}`)
+		if (history.length) {
+			parts.push(`PAST TASKS (Previous Sessions):\n${history.join('\n')}`)
 		}
 
 		const full = parts.join('\n\n')
@@ -195,6 +228,7 @@ export class MemoryStore extends Disposable implements IMemoryStore {
 	 * Cleanup: keep all decision/architecture entries,
 	 * trim oldest non-decision entries to MAX_NON_DECISION_ENTRIES.
 	 * Total entries capped at MAX_ENTRIES.
+	 * Trim taskHistory to max 50.
 	 */
 	private _cleanMemory(): void {
 		const decisions = this.memory.entries.filter(e =>
@@ -205,6 +239,10 @@ export class MemoryStore extends Disposable implements IMemoryStore {
 			.slice(-MAX_NON_DECISION_ENTRIES)
 
 		this.memory.entries = [...decisions, ...others].slice(-MAX_ENTRIES)
+		
+		if (this.memory.taskHistory && this.memory.taskHistory.length > 50) {
+			this.memory.taskHistory = this.memory.taskHistory.slice(-50)
+		}
 	}
 }
 

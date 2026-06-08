@@ -56,6 +56,7 @@ import { IStorageService, StorageScope } from '../../../../../../../platform/sto
 import { OPT_OUT_KEY } from '../../../../common/storageKeys.js'
 import { IAgentPipelineService } from '../../../agentPipelineService.js'
 import { PipelineState } from '../../../../common/agentPipelineTypes.js'
+import { IMemoryStore } from '../../../../common/memoryStore.js'
 
 
 // normally to do this you'd use a useEffect that calls .onDidChangeState(), but useEffect mounts too late and misses initial state changes
@@ -245,6 +246,7 @@ const getReactAccessor = (accessor: ServicesAccessor) => {
 		IStorageService: accessor.get(IStorageService),
 
 		IAgentPipelineService: accessor.get(IAgentPipelineService),
+		IMemoryStore: accessor.get(IMemoryStore),
 
 	} as const
 	return reactAccessor

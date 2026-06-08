@@ -1,9 +1,9 @@
 import * as React from 'react';
 import { useState, useEffect } from 'react';
 import { useAccessor, useAgentPipelineState } from '../util/services.js'
-import { AgentTask, PipelinePhase, AgentPlan } from '../../../../common/agentPipelineTypes.js'
+import { AgentTask, PipelinePhase, AgentPlan, TaskHistoryEntry } from '../../../../common/agentPipelineTypes.js'
 import { validatePlan, importPlanFromAI, formatPlanForExternalAI } from '../../../../common/planExportImport.js'
-import { Copy as CopyIcon, Pencil, Save, Trash2, Plus, ChevronDown, ChevronUp, ChevronRight, ListChecks, FileText, ArrowLeft, Bot, Loader2, Circle, CheckCircle2, XCircle, AlertTriangle, PauseCircle, PlayCircle, XOctagon } from 'lucide-react'
+import { Copy as CopyIcon, Pencil, Save, Trash2, Plus, ChevronDown, ChevronUp, ChevronRight, ListChecks, FileText, ArrowLeft, Bot, Loader2, Circle, CheckCircle2, XCircle, AlertTriangle, PauseCircle, PlayCircle, XOctagon, History, HelpCircle } from 'lucide-react'
 
 export const AgentPipelinePanel = ({
 	className = ''
@@ -14,19 +14,19 @@ export const AgentPipelinePanel = ({
 	const pipelineService = accessor.get('IAgentPipelineService')
 	const state = useAgentPipelineState()
 
-	const [activeDropdown, setActiveDropdown] = useState<'tasks' | 'plan' | null>(null)
+	const [activeDropdown, setActiveDropdown] = useState<'tasks' | 'plan' | 'history' | null>(null)
 
 	useEffect(() => {
 		if (state?.phase === 'plan_review') {
 			setActiveDropdown('plan')
-		} else if (state?.phase === 'executing') {
+		} else if (state?.phase === 'executing' || state?.phase === 'awaiting_feedback') {
 			setActiveDropdown(null)
 		}
 	}, [state?.phase])
 
 	if (!state || (state.phase === 'idle' && !state.error)) return null
 
-	const toggleDropdown = (d: 'tasks' | 'plan') => {
+	const toggleDropdown = (d: 'tasks' | 'plan' | 'history') => {
 		setActiveDropdown(activeDropdown === d ? null : d)
 	}
 
@@ -45,6 +45,13 @@ export const AgentPipelinePanel = ({
 
 			<PipelineStatusBar phase={state.phase} error={state.error} />
 
+			{state.phase === 'awaiting_feedback' && state.pendingQuestion && (
+				<AgentQuestionPanel 
+					question={state.pendingQuestion} 
+					onSubmit={(ans) => pipelineService.submitFeedback(ans)} 
+				/>
+			)}
+
 			{/* Navigation Tabs */}
 			<div className="flex items-center gap-1 border-b border-void-border-3 pb-1.5">
 				<button 
@@ -60,6 +67,13 @@ export const AgentPipelinePanel = ({
 				>
 					<ListChecks size={11} />
 					Tasks
+				</button>
+				<button 
+					className={`flex items-center gap-1 text-[10px] font-medium px-2 py-0.5 rounded transition-colors ${activeDropdown === 'history' ? 'bg-void-bg-3 text-void-fg-1' : 'text-void-fg-3 hover:bg-void-bg-2'}`}
+					onClick={() => toggleDropdown('history')}
+				>
+					<History size={11} />
+					History
 				</button>
 			</div>
 
@@ -111,6 +125,22 @@ export const AgentPipelinePanel = ({
 					</div>
 				)}
 				
+				{activeDropdown === 'history' && (
+					<div className="p-2 bg-void-bg-2 border border-void-border-3 rounded mt-1">
+						<div className="flex justify-between items-center mb-2 pb-1.5 border-b border-void-border-3">
+							<span className="text-[10px] font-semibold text-void-fg-3 uppercase tracking-wider flex items-center gap-1"><History size={10}/> Task History</span>
+							<button 
+								className="flex items-center gap-1 text-[10px] px-1.5 py-0.5 bg-void-bg-1 hover:bg-void-bg-3 border border-void-border-3 rounded text-void-fg-3 hover:text-void-fg-1 transition-colors"
+								onClick={() => setActiveDropdown(null)}
+							>
+								<ArrowLeft size={10} />
+								Back
+							</button>
+						</div>
+						<TaskHistoryPanel />
+					</div>
+				)}
+
 				{activeDropdown === 'tasks' && state.phase === 'planning' && (
 					<div className="text-[10px] text-void-fg-3 font-mono p-2 bg-void-bg-1 rounded border border-void-border-3 overflow-hidden text-ellipsis whitespace-nowrap">
 						{state.executionLog || 'Initializing...'}
@@ -121,6 +151,41 @@ export const AgentPipelinePanel = ({
 	)
 }
 
+const AgentQuestionPanel = ({ question, onSubmit }: { question: string, onSubmit: (ans: string) => void }) => {
+	const [answer, setAnswer] = useState('')
+
+	return (
+		<div className="flex flex-col gap-1.5 p-2 bg-void-bg-2 border border-[#cd9cf2] rounded shadow-sm my-1">
+			<div className="flex gap-1.5">
+				<HelpCircle size={14} className="text-[#cd9cf2] mt-0.5 flex-shrink-0" />
+				<div className="text-[10px] text-void-fg-1 whitespace-pre-wrap font-medium">
+					{question}
+				</div>
+			</div>
+			<textarea 
+				value={answer}
+				onChange={(e: React.ChangeEvent<HTMLTextAreaElement>) => setAnswer(e.target.value)}
+				className="bg-void-bg-1 border border-void-border-3 focus:border-[#cd9cf2] rounded px-2 py-1.5 text-[10px] resize-none h-16 focus:outline-none text-void-fg-1 mt-1 transition-colors placeholder:text-void-fg-4"
+				placeholder="Type your answer here... (or leave blank to skip)"
+				autoFocus
+			/>
+			<div className="flex justify-end gap-1.5 mt-1">
+				<button 
+					onClick={() => onSubmit('Skip')}
+					className="text-[10px] px-3 py-1 bg-void-bg-1 hover:bg-void-bg-3 border border-void-border-3 text-void-fg-3 rounded transition-colors"
+				>
+					Skip
+				</button>
+				<button 
+					onClick={() => onSubmit(answer || 'Proceed with default')}
+					className="text-[10px] px-3 py-1 bg-[#3a2054] hover:bg-[#4a286a] border border-[#cd9cf2] text-[#cd9cf2] rounded transition-colors font-medium shadow-sm"
+				>
+					Submit Answer
+				</button>
+			</div>
+		</div>
+	)
+}
 
 const PipelineStatusBar = ({ phase, error }: { phase: PipelinePhase, error: string | null }) => {
 	let statusText = 'Idle'
@@ -134,6 +199,10 @@ const PipelineStatusBar = ({ phase, error }: { phase: PipelinePhase, error: stri
 		case 'plan_review':
 			statusText = 'Awaiting approval'
 			StatusIcon = <PauseCircle size={12} className="text-void-fg-3" />
+			break
+		case 'awaiting_feedback':
+			statusText = 'Awaiting your input...'
+			StatusIcon = <HelpCircle size={12} className="text-[#cd9cf2] animate-pulse" />
 			break
 		case 'executing':
 			statusText = 'Executing...'
@@ -505,6 +574,49 @@ const TaskExecutionPanel = ({
 					</>
 				) : null}
 			</div>
+		</div>
+	)
+}
+
+const TaskHistoryPanel = () => {
+	const accessor = useAccessor()
+	const state = useAgentPipelineState()
+
+	const [history, setHistory] = useState<TaskHistoryEntry[]>([])
+
+	useEffect(() => {
+		// Memory is loaded in startPipeline, but we can access it from the memoryStore directly
+		const memoryStore = accessor.get('IMemoryStore')
+		setHistory(memoryStore.getTaskHistory().reverse()) // Show newest first
+	}, [state?.phase, accessor])
+
+	if (history.length === 0) {
+		return <div className="text-[10px] text-void-fg-4 italic text-center py-4">No task history found.</div>
+	}
+
+	return (
+		<div className="flex flex-col gap-2 max-h-[50vh] overflow-y-auto pr-1">
+			{history.map((entry) => (
+				<div key={entry.taskId} className="flex flex-col gap-1 p-2 bg-void-bg-1 border border-void-border-3 rounded">
+					<div className="flex items-center justify-between">
+						<div className="flex items-center gap-1.5 text-[10px] font-medium text-void-fg-1">
+							{entry.status === 'done' ? <CheckCircle2 size={10} className="text-[#4caf50]" /> : <XCircle size={10} className="text-void-error" />}
+							<span className="truncate max-w-[200px]">{entry.title}</span>
+						</div>
+						<div className="text-[9px] text-void-fg-4">
+							{new Date(entry.timestamp).toLocaleDateString()}
+						</div>
+					</div>
+					<div className="text-[9px] text-void-fg-3 line-clamp-2">
+						{entry.description}
+					</div>
+					{entry.result && (
+						<div className="text-[9px] text-[#cd9cf2] bg-[#3a2054]/30 px-1.5 py-0.5 rounded mt-0.5 border border-[#cd9cf2]/20">
+							{entry.result}
+						</div>
+					)}
+				</div>
+			))}
 		</div>
 	)
 }
