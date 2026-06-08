@@ -2,9 +2,8 @@ import * as React from 'react';
 import { useState, useEffect } from 'react';
 import { useAccessor, useAgentPipelineState } from '../util/services.js'
 import { AgentTask, PipelinePhase, AgentPlan } from '../../../../common/agentPipelineTypes.js'
-import { IconLoading, IconWarning } from './SidebarChat.js'
 import { validatePlan, importPlanFromAI, formatPlanForExternalAI } from '../../../../common/planExportImport.js'
-import { Copy as CopyIcon, Pencil, Save, Trash2, Plus, ChevronDown, ChevronUp, ChevronRight, ListChecks, FileText, ArrowLeft } from 'lucide-react'
+import { Copy as CopyIcon, Pencil, Save, Trash2, Plus, ChevronDown, ChevronUp, ChevronRight, ListChecks, FileText, ArrowLeft, Bot, Loader2, Circle, CheckCircle2, XCircle, AlertTriangle, PauseCircle, PlayCircle, XOctagon } from 'lucide-react'
 
 export const AgentPipelinePanel = ({
 	className = ''
@@ -32,49 +31,49 @@ export const AgentPipelinePanel = ({
 	}
 
 	return (
-		<div className={`flex flex-col gap-2 p-3 border-b border-void-border-1 bg-void-bg-1 shadow-sm ${className}`}>
-			{/* Top Bar with Mode Indicator */}
-			<div className="flex items-center justify-between mb-1">
-				<div className="flex items-center gap-2">
-					<span className="text-base">🤖</span>
-					<span className="font-bold text-void-fg-1 tracking-wide uppercase text-sm">AGENT</span>
+		<div className={`flex flex-col gap-1.5 p-3 border-b border-void-border-1 bg-void-bg-1 ${className}`}>
+			{/* Top Bar */}
+			<div className="flex items-center justify-between">
+				<div className="flex items-center gap-1.5">
+					<Bot size={14} className="text-void-fg-3" />
+					<span className="font-semibold text-void-fg-2 tracking-wide uppercase text-[11px]">Agent Pipeline</span>
 				</div>
-				<div className="flex items-center gap-1 px-2 py-0.5 bg-[#d29922]/20 border border-[#d29922]/50 rounded-full text-[10px] text-[#d29922] font-semibold tracking-wider">
-					<span>REVIEW-DRIVEN</span>
+				<div className="flex items-center gap-1 px-1.5 py-0.5 bg-void-bg-2 border border-void-border-3 rounded text-[9px] text-void-fg-3 font-medium tracking-wider">
+					<span>{state.phase === 'idle' ? 'IDLE' : state.phase.toUpperCase().replace('_', ' ')}</span>
 				</div>
 			</div>
 
 			<PipelineStatusBar phase={state.phase} error={state.error} />
 
 			{/* Navigation Tabs */}
-			<div className="flex items-center gap-2 mt-1 border-b border-void-border-3 pb-2">
+			<div className="flex items-center gap-1 border-b border-void-border-3 pb-1.5">
 				<button 
-					className={`flex items-center gap-1 text-[11px] font-medium px-2 py-1 rounded transition-colors ${activeDropdown === 'plan' ? 'bg-void-bg-3 text-void-fg-1' : 'text-void-fg-3 hover:bg-void-bg-2'}`}
+					className={`flex items-center gap-1 text-[10px] font-medium px-2 py-0.5 rounded transition-colors ${activeDropdown === 'plan' ? 'bg-void-bg-3 text-void-fg-1' : 'text-void-fg-3 hover:bg-void-bg-2'}`}
 					onClick={() => toggleDropdown('plan')}
 				>
-					<FileText size={12} />
-					Execution Plan
+					<FileText size={11} />
+					Plan
 				</button>
 				<button 
-					className={`flex items-center gap-1 text-[11px] font-medium px-2 py-1 rounded transition-colors ${activeDropdown === 'tasks' ? 'bg-void-bg-3 text-void-fg-1' : 'text-void-fg-3 hover:bg-void-bg-2'}`}
+					className={`flex items-center gap-1 text-[10px] font-medium px-2 py-0.5 rounded transition-colors ${activeDropdown === 'tasks' ? 'bg-void-bg-3 text-void-fg-1' : 'text-void-fg-3 hover:bg-void-bg-2'}`}
 					onClick={() => toggleDropdown('tasks')}
 				>
-					<ListChecks size={12} />
-					Task List
+					<ListChecks size={11} />
+					Tasks
 				</button>
 			</div>
 
 			{/* Dropdown Contents */}
-			<div className="flex flex-col gap-2">
+			<div className="flex flex-col gap-1.5">
 				{activeDropdown === 'plan' && state.currentPlan && (
-					<div className="p-2 bg-void-bg-3 border border-void-border-2 rounded-md shadow-inner mt-2">
-						<div className="flex justify-between items-center mb-2 pb-2 border-b border-void-border-1">
-							<span className="text-xs font-semibold text-void-fg-2 uppercase tracking-wider flex items-center gap-1"><FileText size={12}/> Execution Plan</span>
+					<div className="p-2 bg-void-bg-2 border border-void-border-3 rounded mt-1">
+						<div className="flex justify-between items-center mb-2 pb-1.5 border-b border-void-border-3">
+							<span className="text-[10px] font-semibold text-void-fg-3 uppercase tracking-wider flex items-center gap-1"><FileText size={10}/> Execution Plan</span>
 							<button 
-								className="flex items-center gap-1 text-xs px-2 py-1 bg-void-bg-1 hover:bg-void-bg-2 border border-void-border-1 rounded text-void-fg-3 hover:text-void-fg-1 transition-colors"
+								className="flex items-center gap-1 text-[10px] px-1.5 py-0.5 bg-void-bg-1 hover:bg-void-bg-3 border border-void-border-3 rounded text-void-fg-3 hover:text-void-fg-1 transition-colors"
 								onClick={() => setActiveDropdown(null)}
 							>
-								<ArrowLeft size={12} />
+								<ArrowLeft size={10} />
 								Back
 							</button>
 						</div>
@@ -89,14 +88,14 @@ export const AgentPipelinePanel = ({
 				)}
 
 				{activeDropdown === 'tasks' && state.currentPlan && (
-					<div className="p-2 bg-void-bg-3 border border-void-border-2 rounded-md shadow-inner mt-2">
-						<div className="flex justify-between items-center mb-2 pb-2 border-b border-void-border-1">
-							<span className="text-xs font-semibold text-void-fg-2 uppercase tracking-wider flex items-center gap-1"><ListChecks size={12}/> Task List</span>
+					<div className="p-2 bg-void-bg-2 border border-void-border-3 rounded mt-1">
+						<div className="flex justify-between items-center mb-2 pb-1.5 border-b border-void-border-3">
+							<span className="text-[10px] font-semibold text-void-fg-3 uppercase tracking-wider flex items-center gap-1"><ListChecks size={10}/> Task List</span>
 							<button 
-								className="flex items-center gap-1 text-xs px-2 py-1 bg-void-bg-1 hover:bg-void-bg-2 border border-void-border-1 rounded text-void-fg-3 hover:text-void-fg-1 transition-colors"
+								className="flex items-center gap-1 text-[10px] px-1.5 py-0.5 bg-void-bg-1 hover:bg-void-bg-3 border border-void-border-3 rounded text-void-fg-3 hover:text-void-fg-1 transition-colors"
 								onClick={() => setActiveDropdown(null)}
 							>
-								<ArrowLeft size={12} />
+								<ArrowLeft size={10} />
 								Back
 							</button>
 						</div>
@@ -107,12 +106,13 @@ export const AgentPipelinePanel = ({
 							onPause={() => pipelineService.pausePipeline()}
 							onResume={() => pipelineService.resumePipeline()}
 							onCancel={() => pipelineService.cancelPipeline()}
+							onUpdatePlan={(p) => pipelineService.updatePlan(p)}
 						/>
 					</div>
 				)}
 				
 				{activeDropdown === 'tasks' && state.phase === 'planning' && (
-					<div className="text-sm text-void-fg-3 font-mono p-2 bg-void-bg-1 rounded border border-void-border-3 overflow-hidden text-ellipsis whitespace-nowrap">
+					<div className="text-[10px] text-void-fg-3 font-mono p-2 bg-void-bg-1 rounded border border-void-border-3 overflow-hidden text-ellipsis whitespace-nowrap">
 						{state.executionLog || 'Initializing...'}
 					</div>
 				)}
@@ -124,37 +124,40 @@ export const AgentPipelinePanel = ({
 
 const PipelineStatusBar = ({ phase, error }: { phase: PipelinePhase, error: string | null }) => {
 	let statusText = 'Idle'
-	let Icon = null
+	let StatusIcon: React.ReactNode = null
 
 	switch (phase) {
 		case 'planning':
-			statusText = 'Generating Implementation Plan...'
-			Icon = IconLoading
+			statusText = 'Generating plan...'
+			StatusIcon = <Loader2 size={12} className="text-void-fg-3 animate-spin" />
 			break
 		case 'plan_review':
-			statusText = 'Waiting for Plan Approval'
+			statusText = 'Awaiting approval'
+			StatusIcon = <PauseCircle size={12} className="text-void-fg-3" />
 			break
 		case 'executing':
-			statusText = 'Executing Tasks...'
-			Icon = IconLoading
+			statusText = 'Executing...'
+			StatusIcon = <Loader2 size={12} className="text-void-fg-3 animate-spin" />
 			break
 		case 'paused':
-			statusText = 'Execution Paused'
+			statusText = 'Paused'
+			StatusIcon = <PauseCircle size={12} className="text-void-fg-3" />
 			break
 		case 'done':
-			statusText = 'All Tasks Completed'
+			statusText = 'Complete'
+			StatusIcon = <CheckCircle2 size={12} className="text-[#4caf50]" />
 			break
 	}
 
 	if (error) {
 		statusText = 'Error'
-		Icon = IconWarning
+		StatusIcon = <AlertTriangle size={12} className="text-void-error" />
 	}
 
 	return (
-		<div className="flex items-center gap-2 font-medium px-1 text-xs py-1">
-			{Icon && <Icon className={error ? 'text-void-error' : 'text-[#3794ff]'} size={14} />}
-			<span className={error ? 'text-void-error' : 'text-void-fg-2 tracking-wide'}>{error || statusText}</span>
+		<div className="flex items-center gap-1.5 px-0.5 text-[10px] py-0.5">
+			{StatusIcon}
+			<span className={error ? 'text-void-error' : 'text-void-fg-3'}>{error || statusText}</span>
 		</div>
 	)
 }
@@ -198,43 +201,43 @@ const PlanReviewPanel = ({
 	}
 
 	return (
-		<div className="flex flex-col gap-2 overflow-hidden max-h-[80vh]">
-			<div className="flex gap-2 border-b border-void-border-3 pb-1">
+		<div className="flex flex-col gap-1.5 overflow-hidden max-h-[80vh]">
+			<div className="flex gap-1.5 border-b border-void-border-3 pb-1">
 				<button
-					className={`text-xs px-2 py-1 rounded ${activeTab === 'edit' ? 'bg-void-bg-3 text-void-fg-1 font-medium' : 'text-void-fg-3 hover:bg-void-bg-1'}`}
+					className={`text-[10px] px-1.5 py-0.5 rounded ${activeTab === 'edit' ? 'bg-void-bg-3 text-void-fg-1 font-medium' : 'text-void-fg-3 hover:bg-void-bg-1'}`}
 					onClick={() => setActiveTab('edit')}
 				>
 					Edit
 				</button>
 				<button
-					className={`text-xs px-2 py-1 rounded ${activeTab === 'paste' ? 'bg-void-bg-3 text-void-fg-1 font-medium' : 'text-void-fg-3 hover:bg-void-bg-1'}`}
+					className={`text-[10px] px-1.5 py-0.5 rounded ${activeTab === 'paste' ? 'bg-void-bg-3 text-void-fg-1 font-medium' : 'text-void-fg-3 hover:bg-void-bg-1'}`}
 					onClick={() => setActiveTab('paste')}
 				>
-					Import AI JSON
+					Import JSON
 				</button>
 				<div className="flex-grow" />
 				<button
-					className="text-[10px] px-2 py-0.5 rounded flex items-center gap-1 hover:bg-void-bg-1 text-void-fg-3"
+					className="text-[9px] px-1.5 py-0.5 rounded flex items-center gap-1 hover:bg-void-bg-1 text-void-fg-3"
 					onClick={handleCopyForAI}
 					title="Copy plan to clipboard"
 				>
-					<CopyIcon size={10} /> Copy
+					<CopyIcon size={9} /> Copy
 				</button>
 			</div>
 
 			{activeTab === 'edit' ? (
 				<TaskEditorList plan={plan} onUpdate={onUpdate} />
 			) : (
-				<div className="flex flex-col gap-2">
+				<div className="flex flex-col gap-1.5">
 					<textarea
 						value={pasteInput}
 						onChange={(e: React.ChangeEvent<HTMLTextAreaElement>) => setPasteInput(e.target.value)}
-						className="w-full h-48 bg-void-bg-1 border border-void-border-3 rounded p-2 text-xs font-mono text-void-fg-2 resize-none focus:outline-none focus:border-void-border-1"
+						className="w-full h-40 bg-void-bg-1 border border-void-border-3 rounded p-2 text-[10px] font-mono text-void-fg-2 resize-none focus:outline-none focus:border-void-border-1"
 						placeholder='{"tasks": [...]}'
 					/>
-					{pasteError && <div className="text-xs text-void-error whitespace-pre-wrap">{pasteError}</div>}
+					{pasteError && <div className="text-[10px] text-void-error whitespace-pre-wrap">{pasteError}</div>}
 					<button
-						className="text-xs px-3 py-1 bg-void-bg-1 hover:bg-void-bg-3 text-void-fg-1 border border-void-border-3 rounded self-end"
+						className="text-[10px] px-2 py-1 bg-void-bg-1 hover:bg-void-bg-3 text-void-fg-1 border border-void-border-3 rounded self-end"
 						onClick={handlePastePlan}
 					>
 						Use Plan
@@ -243,18 +246,18 @@ const PlanReviewPanel = ({
 			)}
 
 			{showControls && (
-				<div className="flex gap-2 justify-end mt-3 pt-3 border-t border-void-border-3">
+				<div className="flex gap-2 justify-end mt-2 pt-2 border-t border-void-border-3">
 					<button
-						className="px-4 py-1.5 bg-transparent border border-[#f85149] hover:bg-[#f85149]/10 text-[#f85149] rounded-md text-xs font-semibold transition-all duration-150"
+						className="px-3 py-1 bg-transparent border border-void-border-3 hover:border-void-error hover:text-void-error text-void-fg-3 rounded text-[10px] font-medium transition-all duration-150"
 						onClick={onCancel}
 					>
-						❌ Cancel
+						Cancel
 					</button>
 					<button
-						className="px-4 py-1.5 bg-[#238636] hover:bg-[#2ea043] active:bg-[#238636] text-white rounded-md text-xs font-semibold shadow-sm transition-all duration-150"
+						className="px-3 py-1 bg-void-fg-1 text-void-bg-1 hover:opacity-90 rounded text-[10px] font-medium transition-all duration-150"
 						onClick={onApprove}
 					>
-						✅ Approve Plan
+						Approve Plan
 					</button>
 				</div>
 			)}
@@ -310,33 +313,33 @@ const TaskEditorList = ({ plan, onUpdate }: { plan: AgentPlan, onUpdate: (p: Age
 	}
 
 	return (
-		<div className="flex flex-col gap-2 overflow-y-auto pr-1 max-h-[50vh]">
+		<div className="flex flex-col gap-1.5 overflow-y-auto pr-1 max-h-[50vh]">
 			{errors.length > 0 && (
-				<div className="text-xs text-void-error bg-void-error/10 p-2 rounded">
-					{errors.map((e: string, i: number) => <div key={i}>• {e}</div>)}
+				<div className="text-[10px] text-void-error bg-void-error/10 p-1.5 rounded">
+					{errors.map((e: string, i: number) => <div key={i}>- {e}</div>)}
 				</div>
 			)}
 			
-			<div className="flex flex-col gap-2">
+			<div className="flex flex-col gap-1.5">
 				{plan.tasks.map((task: AgentTask, i: number) => (
 					<TaskEditorItem 
 						key={task.id} 
 						task={task} 
-						index={i} 
-                        isFirst={i === 0}
-                        isLast={i === plan.tasks.length - 1}
+						index={i}
+						isFirst={i === 0}
+						isLast={i === plan.tasks.length - 1}
 						onUpdate={(u) => updateTask(i, u)} 
 						onDelete={() => deleteTask(i)}
-                        onMove={(dir) => moveTask(i, dir)}
+						onMove={(dir) => moveTask(i, dir)}
 					/>
 				))}
 			</div>
 			
 			<button 
-				className="text-xs flex items-center justify-center gap-1 py-1 border border-dashed border-void-border-3 text-void-fg-3 hover:text-void-fg-1 hover:border-void-border-1 rounded mt-1 transition-colors"
+				className="text-[10px] flex items-center justify-center gap-1 py-1 border border-dashed border-void-border-3 text-void-fg-3 hover:text-void-fg-1 hover:border-void-border-1 rounded mt-1 transition-colors"
 				onClick={addTask}
 			>
-				<Plus size={12} /> Add Task
+				<Plus size={10} /> Add Task
 			</button>
 		</div>
 	)
@@ -346,61 +349,61 @@ const TaskEditorList = ({ plan, onUpdate }: { plan: AgentPlan, onUpdate: (p: Age
 const TaskEditorItem = ({ 
 	task, 
 	index,
-    isFirst,
-    isLast,
+	isFirst,
+	isLast,
 	onUpdate, 
 	onDelete,
-    onMove
+	onMove
 }: { 
 	task: AgentTask, 
 	index: number,
-    isFirst: boolean,
-    isLast: boolean,
+	isFirst: boolean,
+	isLast: boolean,
 	onUpdate: (u: Partial<AgentTask>) => void,
 	onDelete: () => void,
-    onMove: (dir: 'up' | 'down') => void
+	onMove: (dir: 'up' | 'down') => void
 }) => {
 	const [isEditing, setIsEditing] = useState(false)
 
 	if (!isEditing) {
 		return (
-			<div className="group flex flex-col gap-1 p-2 bg-void-bg-1 border border-void-border-3 rounded hover:border-void-border-2 transition-colors">
+			<div className="group flex flex-col gap-0.5 p-1.5 bg-void-bg-1 border border-void-border-3 rounded hover:border-void-border-2 transition-colors">
 				<div className="flex items-center justify-between">
-					<div className="text-xs font-medium text-void-fg-1 truncate flex items-center gap-2">
+					<div className="text-[10px] font-medium text-void-fg-1 truncate flex items-center gap-1.5">
 						<span className="text-void-fg-4 font-mono">{index + 1}.</span> {task.title}
 					</div>
-					<div className="flex gap-1 text-void-fg-3">
-                        {!isFirst && <button onClick={() => onMove('up')} className="hover:text-void-fg-1 p-0.5 bg-void-bg-2 rounded border border-void-border-3" title="Move Up"><ChevronUp size={12} /></button>}
-                        {!isLast && <button onClick={() => onMove('down')} className="hover:text-void-fg-1 p-0.5 bg-void-bg-2 rounded border border-void-border-3" title="Move Down"><ChevronDown size={12} /></button>}
-						<button onClick={() => setIsEditing(true)} className="hover:text-void-fg-1 p-0.5 ml-2"><Pencil size={12} /></button>
-						<button onClick={onDelete} className="hover:text-void-error p-0.5"><Trash2 size={12} /></button>
+					<div className="flex gap-0.5 text-void-fg-3">
+						{!isFirst && <button onClick={() => onMove('up')} className="hover:text-void-fg-1 p-0.5 bg-void-bg-2 rounded border border-void-border-3" title="Move Up"><ChevronUp size={10} /></button>}
+						{!isLast && <button onClick={() => onMove('down')} className="hover:text-void-fg-1 p-0.5 bg-void-bg-2 rounded border border-void-border-3" title="Move Down"><ChevronDown size={10} /></button>}
+						<button onClick={() => setIsEditing(true)} className="hover:text-void-fg-1 p-0.5 ml-1"><Pencil size={10} /></button>
+						<button onClick={onDelete} className="hover:text-void-error p-0.5"><Trash2 size={10} /></button>
 					</div>
 				</div>
-				<div className="text-[10px] text-void-fg-3 truncate">{task.description}</div>
+				<div className="text-[9px] text-void-fg-4 truncate">{task.description}</div>
 			</div>
 		)
 	}
 
 	return (
-		<div className="flex flex-col gap-2 p-2 bg-void-bg-2 border border-void-border-1 rounded">
+		<div className="flex flex-col gap-1.5 p-1.5 bg-void-bg-2 border border-void-border-1 rounded">
 			<input 
 				value={task.title}
 				onChange={(e: React.ChangeEvent<HTMLInputElement>) => onUpdate({ title: e.target.value })}
-				className="bg-void-bg-1 border border-void-border-3 rounded px-2 py-1 text-xs focus:outline-none focus:border-void-border-1 text-void-fg-1"
+				className="bg-void-bg-1 border border-void-border-3 rounded px-2 py-0.5 text-[10px] focus:outline-none focus:border-void-border-1 text-void-fg-1"
 				placeholder="Task Title"
 			/>
 			<textarea 
 				value={task.description}
 				onChange={(e: React.ChangeEvent<HTMLTextAreaElement>) => onUpdate({ description: e.target.value })}
-				className="bg-void-bg-1 border border-void-border-3 rounded px-2 py-1 text-[10px] resize-none h-16 focus:outline-none focus:border-void-border-1 text-void-fg-2"
+				className="bg-void-bg-1 border border-void-border-3 rounded px-2 py-0.5 text-[9px] resize-none h-14 focus:outline-none focus:border-void-border-1 text-void-fg-2"
 				placeholder="Task Description"
 			/>
-			<div className="flex justify-end mt-1">
+			<div className="flex justify-end mt-0.5">
 				<button 
 					onClick={() => setIsEditing(false)}
-					className="text-[10px] px-2 py-1 bg-void-bg-1 hover:bg-void-bg-3 text-void-fg-1 border border-void-border-3 rounded flex items-center gap-1"
+					className="text-[9px] px-1.5 py-0.5 bg-void-bg-1 hover:bg-void-bg-3 text-void-fg-1 border border-void-border-3 rounded flex items-center gap-1"
 				>
-					<Save size={10} /> Done
+					<Save size={9} /> Done
 				</button>
 			</div>
 		</div>
@@ -414,7 +417,8 @@ const TaskExecutionPanel = ({
 	phase,
 	onPause,
 	onResume,
-	onCancel
+	onCancel,
+	onUpdatePlan
 }: {
 	plan: AgentPlan
 	currentIndex: number
@@ -422,55 +426,82 @@ const TaskExecutionPanel = ({
 	onPause: () => void
 	onResume: () => void
 	onCancel: () => void
+	onUpdatePlan: (p: AgentPlan) => void
 }) => {
 	const doneCount = plan.tasks.filter((t: AgentTask) => t.status === 'done').length
 	const totalCount = plan.tasks.length
+	const canReorder = phase === 'paused' || phase === 'plan_review'
 	
 	const renderStatus = (status: AgentTask['status']) => {
 		switch (status) {
-			case 'pending': return <span className="text-void-fg-4">○</span>
-			case 'running': return <span className="text-[#e8b548] animate-pulse">◉</span>
-			case 'done': return <span className="text-[#4caf50]">✓</span>
-			case 'failed': return <span className="text-void-error">✗</span>
+			case 'pending': return <Circle size={11} className="text-void-fg-4" />
+			case 'running': return <Loader2 size={11} className="text-[#3794ff] animate-spin" />
+			case 'done': return <CheckCircle2 size={11} className="text-[#4caf50]" />
+			case 'failed': return <XCircle size={11} className="text-void-error" />
+		}
+	}
+
+	const moveTask = (index: number, direction: 'up' | 'down') => {
+		const newTasks = [...plan.tasks]
+		if (direction === 'up' && index > 0 && newTasks[index].status === 'pending' && newTasks[index - 1].status === 'pending') {
+			const temp = newTasks[index - 1]
+			newTasks[index - 1] = newTasks[index]
+			newTasks[index] = temp
+			onUpdatePlan({ ...plan, tasks: newTasks })
+		} else if (direction === 'down' && index < newTasks.length - 1 && newTasks[index].status === 'pending' && newTasks[index + 1].status === 'pending') {
+			const temp = newTasks[index + 1]
+			newTasks[index + 1] = newTasks[index]
+			newTasks[index] = temp
+			onUpdatePlan({ ...plan, tasks: newTasks })
 		}
 	}
 
 	return (
-		<div className="flex flex-col gap-2">
+		<div className="flex flex-col gap-1.5">
 			{/* Progress */}
-			<div className="flex items-center justify-between text-[10px] text-void-fg-3">
+			<div className="flex items-center justify-between text-[9px] text-void-fg-3">
 				<span>Progress</span>
-				<span className="font-mono">{doneCount}/{totalCount} tasks completed</span>
+				<span className="font-mono">{doneCount}/{totalCount}</span>
 			</div>
 			
-			<div className="w-full bg-void-bg-1 rounded-full h-1">
-				<div className="bg-[#4caf50] h-1 rounded-full transition-all duration-500" style={{ width: `${(doneCount/totalCount)*100}%` }}></div>
+			<div className="w-full bg-void-bg-1 rounded-full h-[3px]">
+				<div className="bg-[#3794ff] h-[3px] rounded-full transition-all duration-500" style={{ width: `${totalCount > 0 ? (doneCount/totalCount)*100 : 0}%` }}></div>
 			</div>
 
 			{/* Task list */}
-			<div className="flex flex-col gap-1 max-h-48 overflow-y-auto pt-2">
+			<div className="flex flex-col gap-0.5 max-h-48 overflow-y-auto pt-1">
 				{plan.tasks.map((task: AgentTask, i: number) => (
 					<div 
 						key={task.id} 
-						className={`flex items-center gap-2 text-xs py-1 px-2 rounded transition-colors
+						className={`flex items-center gap-1.5 text-[10px] py-1 px-1.5 rounded transition-colors
 							${i === currentIndex && phase === 'executing' ? 'bg-void-bg-1 border border-void-border-3 text-void-fg-1 font-medium' : 'border border-transparent'}
-							${task.status === 'done' ? 'text-void-fg-4 opacity-70' : 'text-void-fg-2'}
+							${task.status === 'done' ? 'text-void-fg-4 opacity-60' : 'text-void-fg-2'}
 						`}
 					>
 						<div className="flex-shrink-0">{renderStatus(task.status)}</div>
-						<div className="truncate">{task.title}</div>
+						<div className="truncate flex-grow">{task.title}</div>
+						{canReorder && task.status === 'pending' && (
+							<div className="flex gap-0.5 flex-shrink-0">
+								{i > 0 && plan.tasks[i - 1]?.status === 'pending' && (
+									<button onClick={() => moveTask(i, 'up')} className="text-void-fg-4 hover:text-void-fg-1 p-0.5"><ChevronUp size={10} /></button>
+								)}
+								{i < plan.tasks.length - 1 && plan.tasks[i + 1]?.status === 'pending' && (
+									<button onClick={() => moveTask(i, 'down')} className="text-void-fg-4 hover:text-void-fg-1 p-0.5"><ChevronDown size={10} /></button>
+								)}
+							</div>
+						)}
 					</div>
 				))}
 			</div>
 
 			{/* Controls */}
-			<div className="flex justify-end gap-2 mt-2 pt-2 border-t border-void-border-3">
+			<div className="flex justify-end gap-1.5 mt-1.5 pt-1.5 border-t border-void-border-3">
 				{phase === 'executing' ? (
-					<button className="text-xs px-3 py-1 rounded border border-void-border-3 hover:bg-void-bg-1 text-void-fg-2 transition-colors" onClick={onPause}>Pause</button>
+					<button className="text-[10px] px-2 py-0.5 rounded border border-void-border-3 hover:bg-void-bg-1 text-void-fg-2 transition-colors flex items-center gap-1" onClick={onPause}><PauseCircle size={10} /> Pause</button>
 				) : phase === 'paused' ? (
 					<>
-						<button className="text-xs px-3 py-1 rounded border border-void-border-3 hover:bg-void-bg-1 text-void-fg-2 transition-colors" onClick={onCancel}>Cancel Pipeline</button>
-						<button className="text-xs px-3 py-1 rounded bg-void-fg-1 text-void-bg-1 hover:opacity-90 transition-opacity" onClick={onResume}>Resume</button>
+						<button className="text-[10px] px-2 py-0.5 rounded border border-void-border-3 hover:border-void-error hover:text-void-error text-void-fg-3 transition-colors flex items-center gap-1" onClick={onCancel}><XOctagon size={10} /> Cancel</button>
+						<button className="text-[10px] px-2 py-0.5 rounded bg-void-fg-1 text-void-bg-1 hover:opacity-90 transition-opacity flex items-center gap-1" onClick={onResume}><PlayCircle size={10} /> Resume</button>
 					</>
 				) : null}
 			</div>

@@ -165,6 +165,98 @@ const findIndexOfAny = (fullText: string, matches: string[]) => {
 
 
 type ToolOfToolName = { [toolName: string]: InternalToolInfo | undefined }
+
+/**
+ * Parser-level parameter normalization. Fixes hallucinated parameter names
+ * from small models so that toolsService.validateParams never receives wrong params.
+ * This is the LAST LINE OF DEFENSE — it fires on every single tool call.
+ */
+function normalizeToolParams(toolName: string, params: RawToolParamsObj): void {
+	// === URI normalization: file_path, path, directory, folder → uri ===
+	if (!params.uri) {
+		const uriAliases = ['file_path', 'path', 'filepath', 'file', 'directory', 'folder', 'dir']
+		for (const alias of uriAliases) {
+			if (params[alias]) {
+				params.uri = params[alias]
+				delete params[alias]
+				break
+			}
+		}
+	}
+
+	// === Clean URI values: strip quotes, backticks ===
+	if (typeof params.uri === 'string') {
+		params.uri = params.uri.replace(/^["`']+|["`']+$/g, '').trim()
+	}
+
+	// === run_command: arguments/args → command ===
+	if (toolName === 'run_command' || toolName === 'execute_command') {
+		if (!params.command) {
+			const cmdAliases = ['arguments', 'args', 'cmd', 'exec', 'script']
+			for (const alias of cmdAliases) {
+				if (params[alias]) {
+					params.command = params[alias]
+					delete params[alias]
+					break
+				}
+			}
+		}
+		// Clean command value
+		if (typeof params.command === 'string') {
+			params.command = params.command.replace(/^["`']+|["`']+$/g, '').trim()
+		}
+	}
+
+	// === edit_file: content/blocks/searchReplaceBlocks → search_replace_blocks ===
+	if (toolName === 'edit_file') {
+		if (!params.search_replace_blocks) {
+			const blockAliases = ['searchReplaceBlocks', 'blocks', 'content', 'changes', 'edits']
+			for (const alias of blockAliases) {
+				if (params[alias]) {
+					params.search_replace_blocks = params[alias]
+					delete params[alias]
+					break
+				}
+			}
+		}
+	}
+
+	// === rewrite_file: content → new_content ===
+	if (toolName === 'rewrite_file') {
+		if (!params.new_content) {
+			const contentAliases = ['content', 'file_content', 'code', 'body', 'text']
+			for (const alias of contentAliases) {
+				if (params[alias]) {
+					params.new_content = params[alias]
+					delete params[alias]
+					break
+				}
+			}
+		}
+	}
+
+	// === search tools: search_query/pattern/text → query ===
+	if (toolName === 'search_for_files' || toolName === 'search_pathnames_only' || toolName === 'search_in_file') {
+		if (!params.query) {
+			const queryAliases = ['search_query', 'pattern', 'text', 'search', 'term']
+			for (const alias of queryAliases) {
+				if (params[alias]) {
+					params.query = params[alias]
+					delete params[alias]
+					break
+				}
+			}
+		}
+	}
+
+	// === Clean all string params: strip surrounding quotes/backticks ===
+	for (const key in params) {
+		if (typeof params[key] === 'string' && key !== 'search_replace_blocks' && key !== 'new_content' && key !== 'command') {
+			params[key] = (params[key] as string).replace(/^["`']+|["`']+$/g, '').trim()
+		}
+	}
+}
+
 const parseXMLPrefixToToolCall = <T extends ToolName,>(toolName: T, toolId: string, str: string, toolOfToolName: ToolOfToolName): RawToolCallObj => {
 	const paramsObj: RawToolParamsObj = {}
 	const doneParams: ToolParamName<T>[] = []
@@ -182,6 +274,9 @@ const parseXMLPrefixToToolCall = <T extends ToolName,>(toolName: T, toolId: stri
 		// return tool call
 		let outName = toolName;
 		if (outName === 'execute_command' as any) outName = 'run_command' as any;
+
+		// Normalize params before returning — fixes hallucinated parameter names from small models
+		normalizeToolParams(outName, paramsObj)
 
 		const ans: RawToolCallObj = {
 			name: outName,

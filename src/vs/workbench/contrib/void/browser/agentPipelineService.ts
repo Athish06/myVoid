@@ -182,7 +182,43 @@ class AgentPipelineService extends Disposable implements IAgentPipelineService {
 		}
 
 		try {
-			await this._runPlanningPhase(userPrompt, !clearOldPlan)
+			const forceplan = this._settingsService.state.globalSettings.agentForceExecutionPlan
+			if (forceplan === true || forceplan === 'my_plan') {
+				await this._runPlanningPhase(userPrompt, !clearOldPlan, forceplan === 'my_plan')
+			} else {
+				// Plan is OFF — skip planning, create single-task plan and execute directly
+				const directoryStr = await this._directoryStrService.getAllDirectoriesStr({
+					cutOffMessage: '...cut off...'
+				})
+				const workspaceFolders = this._workspaceContextService?.getWorkspace?.()?.folders || []
+				const workspaceRoot = workspaceFolders.length > 0 ? workspaceFolders[0].uri.fsPath : ''
+
+				const richDescription = `${userPrompt}\n\nWORKSPACE ROOT: ${workspaceRoot}\n\nFILE STRUCTURE:\n${directoryStr.slice(0, 1500)}\n\nIMPORTANT: You MUST use the available XML tools (<read_file>, <rewrite_file>, <edit_file>, <run_command>, <ls_dir>, etc.) to complete this task. Do NOT just describe what to do — actually execute it using XML tool calls. Start by exploring the relevant files using <ls_dir> or <get_dir_tree> if needed. Do NOT type these tool names into the terminal.`
+
+				const plan: AgentPlan = {
+					refinedPrompt: userPrompt,
+					projectSummary: '',
+					techStack: [],
+					tasks: [{
+						id: 'task_001',
+						title: userPrompt.slice(0, 80),
+						description: richDescription,
+						targetFiles: [],
+						dependsOn: [],
+						taskType: 'modify',
+						status: 'pending',
+					}],
+					createdAt: Date.now(),
+					lastModified: Date.now(),
+				}
+				this._setState({
+					currentPlan: plan,
+					phase: 'executing',
+					currentTaskIndex: 0,
+					executionLog: 'Planning bypassed, executing directly...',
+				})
+				await this._runExecutionPhase()
+			}
 		} catch (error) {
 			const message = error instanceof Error ? error.message : String(error)
 			this._setState({ phase: 'idle', error: `Planning failed: ${message}` })
@@ -191,7 +227,7 @@ class AgentPipelineService extends Disposable implements IAgentPipelineService {
 
 	// ======================== Phase 1: Planning ========================
 
-	private async _runPlanningPhase(userPrompt: string, isAppending: boolean = false): Promise<void> {
+	private async _runPlanningPhase(userPrompt: string, isAppending: boolean = false, isMyPlan: boolean = false): Promise<void> {
 		const modelSelection = this.getPlanningModelSelection()
 		if (!modelSelection) {
 			this._setState({ phase: 'idle', error: 'No model selected. Please configure a model in Void Settings.' })
@@ -230,7 +266,6 @@ class AgentPipelineService extends Disposable implements IAgentPipelineService {
 			this._setState({ executionLog: `Prompt refinement failed (${this._lastLLMError || 'unknown error'}), using your original prompt...` })
 		}
 
-
 		// Update memory with project info
 		const memory = this._memoryStore.getMemory()
 		const newProjectSummary = projectSummary || memory.projectSummary
@@ -239,53 +274,70 @@ class AgentPipelineService extends Disposable implements IAgentPipelineService {
 
 		const existingTasks = isAppending && this.state.currentPlan ? this.state.currentPlan.tasks : []
 		const existingTasksStr = existingTasks.map((t, i) => `${i + 1}. [${t.status}] ${t.title} - ${t.description}`).join('\n')
-
-		// Step 2: Generate task list
-		this._setState({ executionLog: 'Generating task list...' })
-		const taskResult = await this._callLLMForJSON(
-			TASK_GENERATOR_SYSTEM,
-			buildTaskGeneratorUserMessage(refinedPrompt, newProjectSummary, newTechStack, directoryStr, existingTasksStr),
-			modelSelection,
-		)
-
 		let tasks: AgentTask[]
 
-		if (!taskResult) {
-			// Task generation failed — create a single fallback task with the user's prompt
-			this._setState({ executionLog: `Task generation failed (${this._lastLLMError || 'unknown error'}), creating single task from your prompt...` })
+		// Helper to build rich fallback description
+		const workspaceFolders = this._workspaceContextService?.getWorkspace?.()?.folders || []
+		const workspaceRoot = workspaceFolders.length > 0 ? workspaceFolders[0].uri.fsPath : ''
+		const richFallbackDescription = `${refinedPrompt}\n\nWORKSPACE ROOT: ${workspaceRoot}\n\nFILE STRUCTURE:\n${directoryStr.slice(0, 1500)}\n\nIMPORTANT: You MUST use the available XML tools (<read_file>, <rewrite_file>, <edit_file>, <run_command>, <ls_dir>, etc.) to complete this task. Do NOT just describe what to do — actually execute it using XML tool calls. Start by exploring the relevant files using <ls_dir> or <get_dir_tree> if needed. Do NOT type these tool names into the terminal.`
+
+		if (isMyPlan) {
+			this._setState({ executionLog: 'Ready for you to paste or edit your execution plan.' })
 			tasks = [{
 				id: 'task_001',
-				title: refinedPrompt.slice(0, 80),
-				description: refinedPrompt,
+				title: 'Manual Task (Edit me)',
+				description: richFallbackDescription,
 				targetFiles: [],
 				dependsOn: [],
 				taskType: 'modify',
 				status: 'pending',
 			}]
 		} else {
-			try {
-				const parsed = JSON.parse(taskResult)
-				const rawTasks: AgentTask[] = (parsed.tasks || []).map((t: Record<string, unknown>, i: number) => ({
-					id: (t.id as string) || `task_${String(i + 1).padStart(3, '0')}`,
-					title: (t.title as string) || `Task ${i + 1}`,
-					description: (t.description as string) || '',
-					targetFiles: Array.isArray(t.targetFiles) ? t.targetFiles as string[] : [],
-					dependsOn: Array.isArray(t.dependsOn) ? t.dependsOn as string[] : [],
-					taskType: (t.taskType === 'create' || t.taskType === 'modify' || t.taskType === 'refactor') ? t.taskType : 'modify',
-					status: 'pending' as const,
-				}))
-				tasks = autoSplitOversizedTasks(rawTasks)
-			} catch {
-				// Parsing failed — create single task fallback
+			// Step 2: Generate task list
+			this._setState({ executionLog: 'Generating task list...' })
+			const taskResult = await this._callLLMForJSON(
+				TASK_GENERATOR_SYSTEM,
+				buildTaskGeneratorUserMessage(refinedPrompt, newProjectSummary, newTechStack, directoryStr, existingTasksStr),
+				modelSelection,
+			)
+
+			if (!taskResult) {
+				// Task generation failed — create a single fallback task with the user's prompt
+				this._setState({ executionLog: `Task generation failed (${this._lastLLMError || 'unknown error'}), creating single task from your prompt...` })
 				tasks = [{
 					id: 'task_001',
 					title: refinedPrompt.slice(0, 80),
-					description: refinedPrompt,
+					description: richFallbackDescription,
 					targetFiles: [],
 					dependsOn: [],
 					taskType: 'modify',
 					status: 'pending',
 				}]
+			} else {
+				try {
+					const parsed = JSON.parse(taskResult)
+					const rawTasks: AgentTask[] = (parsed.tasks || []).map((t: Record<string, unknown>, i: number) => ({
+						id: (t.id as string) || `task_${String(i + 1).padStart(3, '0')}`,
+						title: (t.title as string) || `Task ${i + 1}`,
+						description: (t.description as string) || '',
+						targetFiles: Array.isArray(t.targetFiles) ? t.targetFiles as string[] : [],
+						dependsOn: Array.isArray(t.dependsOn) ? t.dependsOn as string[] : [],
+						taskType: (t.taskType === 'create' || t.taskType === 'modify' || t.taskType === 'refactor') ? t.taskType : 'modify',
+						status: 'pending' as const,
+					}))
+					tasks = autoSplitOversizedTasks(rawTasks)
+				} catch {
+					// Parsing failed — create single task fallback
+					tasks = [{
+						id: 'task_001',
+						title: refinedPrompt.slice(0, 80),
+						description: richFallbackDescription,
+						targetFiles: [],
+						dependsOn: [],
+						taskType: 'modify',
+						status: 'pending',
+					}]
+				}
 			}
 		}
 
@@ -390,7 +442,7 @@ class AgentPipelineService extends Disposable implements IAgentPipelineService {
 			const executionPrompt = buildTaskExecutionPrompt(task, plan, memoryContext)
 
 			// Get the workspace root
-			const workspaceFolders = this._workspaceContextService.getWorkspace().folders
+			const workspaceFolders = this._workspaceContextService?.getWorkspace?.()?.folders || []
 			const workspaceRootMsg = workspaceFolders.length > 0 
 				? `Your root workspace directory is: ${workspaceFolders[0].uri.fsPath}\nUse this as the cwd for all terminal commands unless instructed otherwise.` 
 				: 'No workspace folder is open.'
@@ -487,24 +539,41 @@ class AgentPipelineService extends Disposable implements IAgentPipelineService {
 	/**
 	 * Wait for the current thread's stream to complete.
 	 * Polls the stream state until it's no longer running.
+	 * Handles race conditions where the stream may already be running or already finished.
 	 */
 	private _waitForStreamComplete(threadId: string): Promise<void> {
 		return new Promise<void>((resolve) => {
-			let streamStarted = false
+			// Check if stream is already running right now
+			const currentState = this._chatThreadService.streamState[threadId]
+			let streamStarted = currentState?.isRunning !== undefined
 
+			// If stream is not even started yet and not running, give it a moment to start
 			const disposable = this._chatThreadService.onDidChangeStreamState(({ threadId: id }) => {
 				if (id !== threadId) return
 				const state = this._chatThreadService.streamState[threadId]
 
-				if (!streamStarted && state?.isRunning) {
+				if (!streamStarted && state?.isRunning !== undefined) {
 					streamStarted = true // stream confirmed started
 					return
 				}
-				if (streamStarted && !state?.isRunning) {
+				if (streamStarted && state?.isRunning === undefined) {
 					disposable.dispose()
 					resolve()
 				}
 			})
+
+			// Safety: if stream already finished before listener was attached
+			if (streamStarted && currentState?.isRunning === undefined) {
+				disposable.dispose()
+				resolve()
+				return
+			}
+
+			// Timeout fallback: max 5 minutes per task to prevent infinite hang
+			setTimeout(() => {
+				disposable.dispose()
+				resolve()
+			}, 5 * 60 * 1000)
 		})
 	}
 

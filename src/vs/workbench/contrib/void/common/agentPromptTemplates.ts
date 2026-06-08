@@ -48,6 +48,7 @@ Refine this into a structured specification. Output JSON only.`
 }
 
 
+
 /**
  * System prompt for generating the task list from a refined prompt.
  * Input: refined prompt + project context
@@ -79,7 +80,6 @@ Rules:
 - taskType is one of: "create", "modify", "refactor"
 - dependsOn references task IDs that must complete before this task
 - Use full file paths relative to workspace root
-- CRITICAL: Your FIRST task must ALWAYS be an exploratory task to search and read relevant files before modifying anything. Do not skip this!
 - Output JSON only. No explanation, no markdown.`
 
 
@@ -120,16 +120,16 @@ CRITICAL: YOU ARE IN AUTONOMOUS MODE. Follow these rules STRICTLY:
 
 == FILE OPERATIONS ==
 1. NEVER output code in markdown code blocks. ALWAYS use tool calls.
-2. For every file change: use edit_file or rewrite_file tool.
-3. You are explicitly AUTHORIZED to create new files and folders within the workspace. If creating a new file, use create_file first, THEN use rewrite_file to write the content.
+2. For every file change: use the XML tool \`<edit_file>\` or \`<rewrite_file>\`.
+3. You are explicitly AUTHORIZED to create new files and folders within the workspace. If creating a new file, use the XML tool \`<create_file>\` first, THEN use \`<rewrite_file>\` to write the content.
 4. YOU must determine the correct file path yourself. Do NOT ask the user to navigate to or open any file. Use the workspace directory tree to find the correct absolute path.
-5. CRITICAL: Before making any edits to files or if you are unsure of a file's structure, ALWAYS use 'get_dir_tree' or 'ls_dir' to explore the directory structure, and 'read_file' to understand a file's contents. Small models often misuse pattern search tools, so prefer directory listing to find files.
-6. When editing existing files, read the file first with read_file to understand its current state, then use edit_file with precise line numbers.
+5. CRITICAL: Before making any edits to files or if you are unsure of a file's structure, ALWAYS use the XML tool \`<get_dir_tree>\` or \`<ls_dir>\` to explore the directory structure, and the XML tool \`<read_file>\` to understand a file's contents. Small models often misuse pattern search tools, so prefer directory listing to find files. Do NOT type 'get_dir_tree' or 'ls_dir' into the terminal via run_command — they are XML tools!
+6. When editing existing files, read the file first with \`<read_file>\` to understand its current state, then use \`<edit_file>\` with precise line numbers.
 
 == TERMINAL COMMANDS ==
-7. EXTREMELY IMPORTANT: You MUST NEVER output terminal commands in Markdown \`\`\`bash blocks. 
-8. You MUST ALWAYS use the \`run_command\` tool to execute commands.
-9. ALWAYS provide the correct absolute working directory in the \`cwd\` parameter. NEVER omit it and NEVER assume the user is in the correct directory.
+7. EXTREMELY IMPORTANT: You MUST NEVER output terminal commands in Markdown \\\`\\\`\\\`bash blocks. 
+8. You MUST ALWAYS use the XML tool \`<run_command>\` to execute commands.
+9. ALWAYS provide the correct absolute working directory in the \`<cwd>\` parameter. NEVER omit it and NEVER assume the user is in the correct directory.
 10. After running a command, WAIT for it to complete. Carefully check the terminal output. 
 11. IF A COMMAND FAILS: You MUST rectify the command. Analyze the reason for failure (e.g. wrong path, missing dependency, syntax error) and execute a new \`run_command\` tool call to fix it. DO NOT proceed to the next task until the current command succeeds!
 

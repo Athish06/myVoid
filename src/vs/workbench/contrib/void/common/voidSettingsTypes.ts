@@ -453,6 +453,7 @@ export type GlobalSettings = {
 	disableSystemMessage: boolean;
 	autoAcceptLLMChanges: boolean;
 	agentPipelineEnabled: boolean;
+	agentForceExecutionPlan: boolean | 'my_plan';     // true = ON, false = OFF, 'my_plan' = Use user's exact plan
 	agentPlanningModelOverride: string;   // empty string = use Chat model
 	agentExecutionModelOverride: string;  // empty string = use Chat model
 }
@@ -472,6 +473,7 @@ export const defaultGlobalSettings: GlobalSettings = {
 	disableSystemMessage: false,
 	autoAcceptLLMChanges: false,
 	agentPipelineEnabled: false,
+	agentForceExecutionPlan: false,
 	agentPlanningModelOverride: '',
 	agentExecutionModelOverride: '',
 }

@@ -340,6 +340,7 @@ export const VoidChatArea: React.FC<VoidChatAreaProps> = ({
 	loadingIcon,
 }) => {
 	const settingsState = useSettingsState()
+	const accessor = useAccessor()
 
 	return (
 		<div
@@ -393,12 +394,41 @@ export const VoidChatArea: React.FC<VoidChatAreaProps> = ({
 						<div className='flex items-center flex-wrap gap-x-2 gap-y-1 text-nowrap '>
 							{featureName === 'Chat' && <ChatModeDropdown className='text-xs text-void-fg-3 bg-void-bg-1 border border-void-border-2 rounded py-0.5 px-1' />}
 							<ModelDropdown featureName={featureName} className='text-xs text-void-fg-3 bg-void-bg-1 rounded' />
-							{settingsState.globalSettings.agentPipelineEnabled && (
-								<div className="text-[10px] text-green-400 bg-green-500/10 border border-green-500/30 rounded px-1.5 py-0.5 flex items-center gap-1">
-									<div className="w-1.5 h-1.5 rounded-full bg-green-500 animate-pulse" />
+							{(settingsState.globalSettings.agentPipelineEnabled || settingsState.globalSettings.chatMode === 'agent') && featureName === 'Chat' && (
+							<>
+								<div className="text-[10px] text-void-fg-3 bg-void-bg-2 border border-void-border-3 rounded px-1.5 py-0.5 flex items-center gap-1">
+									<div className="w-1.5 h-1.5 rounded-full bg-[#3794ff]" />
 									Agent Pipeline Active
 								</div>
-							)}
+								<button
+									className={`text-[10px] rounded px-1.5 py-0.5 flex items-center gap-1 border transition-colors ${
+										settingsState.globalSettings.agentForceExecutionPlan === 'my_plan'
+											? 'text-[#cd9cf2] bg-[#3a2054] border-[#cd9cf2]'
+											: settingsState.globalSettings.agentForceExecutionPlan
+											? 'text-void-fg-1 bg-void-bg-3 border-void-border-1'
+											: 'text-void-fg-4 bg-void-bg-1 border-void-border-3 hover:text-void-fg-2 hover:border-void-border-2'
+									}`}
+									onClick={() => {
+										const voidSettingsService = accessor.get('IVoidSettingsService')
+										const curr = settingsState.globalSettings.agentForceExecutionPlan
+										let next: boolean | 'my_plan' = false
+										if (curr === false) next = true
+										else if (curr === true) next = 'my_plan'
+										else next = false
+										voidSettingsService.setGlobalSetting('agentForceExecutionPlan', next)
+									}}
+									title={
+										settingsState.globalSettings.agentForceExecutionPlan === 'my_plan'
+											? "Extract exact steps from your prompt — click to turn OFF"
+											: settingsState.globalSettings.agentForceExecutionPlan
+											? "Auto-generate plan — click to use MY PLAN"
+											: "Planning is skipped — click to turn ON"
+									}
+								>
+									Plan {settingsState.globalSettings.agentForceExecutionPlan === 'my_plan' ? 'MY PLAN' : settingsState.globalSettings.agentForceExecutionPlan ? 'ON' : 'OFF'}
+								</button>
+							</>
+						)}
 						</div>
 					</div>
 				)}
