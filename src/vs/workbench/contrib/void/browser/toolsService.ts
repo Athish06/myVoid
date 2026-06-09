@@ -62,14 +62,14 @@ const validateURI = (uriStr: unknown, workspaceContextService: IWorkspaceContext
 
 	if (folders.length > 0) {
 		const workspaceRoot = folders[0].uri;
-		const fsPath = workspaceRoot.fsPath;
 		
-		// If the LLM already provided the full absolute path
-		if (uriStr.startsWith(fsPath) || uriStr.replace(/\\/g, '/').startsWith(fsPath.replace(/\\/g, '/'))) {
+		// 1. Check if the LLM provided an absolute path (Windows drive letter or absolute Unix path)
+		const isAbsolute = /^[a-zA-Z]:[\\/]/.test(uriStr) || uriStr.startsWith('/');
+		if (isAbsolute) {
 			return URI.file(uriStr);
 		}
 		
-		// Otherwise, treat it as relative to the workspace root
+		// 2. Otherwise, treat it as relative to the workspace root
 		// Remove leading slashes so joinPath works correctly as a relative append
 		const cleanUriStr = uriStr.replace(/^[\\/]+/, '');
 		return URI.joinPath(workspaceRoot, cleanUriStr);
@@ -424,11 +424,19 @@ export class ToolsService implements IToolsService {
 			// ---
 
 			create_file: async ({ uri }) => {
+				const exists = await fileService.exists(uri)
+				if (exists) {
+					return { result: { message: `The file ${uri.fsPath} already exists. You do not need to create it again. Please proceed to use read_file or rewrite_file to interact with it.` } }
+				}
 				await fileService.createFile(uri)
 				return { result: {} }
 			},
 
 			create_folder: async ({ uri }) => {
+				const exists = await fileService.exists(uri)
+				if (exists) {
+					return { result: { message: `The folder ${uri.fsPath} already exists.` } }
+				}
 				await fileService.createFolder(uri)
 				return { result: {} }
 			},
@@ -549,9 +557,15 @@ export class ToolsService implements IToolsService {
 			},
 			// ---
 			create_file: (params, result) => {
+				if (result.message) {
+					return result.message;
+				}
 				return `File ${params.uri.fsPath} successfully created.`
 			},
 			create_folder: (params, result) => {
+				if (result.message) {
+					return result.message;
+				}
 				return `Folder ${params.uri.fsPath} successfully created.`
 			},
 			delete_file_or_folder: (params, result) => {
@@ -579,11 +593,14 @@ export class ToolsService implements IToolsService {
 				const { resolveReason, result: result_, } = result
 				// success
 				if (resolveReason.type === 'done') {
+					if (resolveReason.exitCode !== 0) {
+						return `${result_}\n(exit code ${resolveReason.exitCode})\n\n[CRITICAL FAILURE: DO NOT APOLOGIZE. DO NOT EXPLAIN. YOU ARE AN AUTONOMOUS CODING AGENT. IMMEDIATELY OUTPUT A <run_command> OR OTHER XML TOOL TO FIX THIS ERROR. DO NOT OUTPUT PLAIN TEXT.]`
+					}
 					return `${result_}\n(exit code ${resolveReason.exitCode})`
 				}
 				// normal command
 				if (resolveReason.type === 'timeout') {
-					return `${result_}\nTerminal command ran, but was automatically killed by Void after ${MAX_TERMINAL_INACTIVE_TIME}s of inactivity and did not finish successfully. To try with more time, open a persistent terminal and run the command there.`
+					return `${result_}\nTerminal command ran, but was automatically killed by Void after ${MAX_TERMINAL_INACTIVE_TIME}s of inactivity and did not finish successfully. To try with more time, open a persistent terminal and run the command there.\n\n[CRITICAL FAILURE: DO NOT APOLOGIZE. DO NOT EXPLAIN. YOU ARE AN AUTONOMOUS CODING AGENT. IMMEDIATELY OUTPUT A <run_command> OR OTHER XML TOOL TO FIX THIS ERROR. DO NOT OUTPUT PLAIN TEXT.]`
 				}
 				throw new Error(`Unexpected internal error: Terminal command did not resolve with a valid reason.`)
 			},
@@ -593,6 +610,9 @@ export class ToolsService implements IToolsService {
 				const { persistentTerminalId } = params
 				// success
 				if (resolveReason.type === 'done') {
+					if (resolveReason.exitCode !== 0) {
+						return `${result_}\n(exit code ${resolveReason.exitCode})\n\n[CRITICAL FAILURE: DO NOT APOLOGIZE. DO NOT EXPLAIN. YOU ARE AN AUTONOMOUS CODING AGENT. IMMEDIATELY OUTPUT A <run_command> OR OTHER XML TOOL TO FIX THIS ERROR. DO NOT OUTPUT PLAIN TEXT.]`
+					}
 					return `${result_}\n(exit code ${resolveReason.exitCode})`
 				}
 				// bg command

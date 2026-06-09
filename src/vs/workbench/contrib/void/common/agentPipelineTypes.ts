@@ -116,6 +116,50 @@ export const DEFAULT_PIPELINE_STATE: PipelineState = {
 	feedbackAnswer: null,
 }
 
+// ======================== Session State (per-pipeline, deterministic) ========================
+
+export interface InstalledPackage {
+	manager: 'npm' | 'pip' | 'cargo' | 'other'
+	name: string
+	taskId: string
+}
+
+export interface TaskOutcome {
+	taskId: string
+	title: string
+	status: 'done' | 'failed'
+	filesCreated: string[]
+	filesModified: string[]
+	packagesInstalled: InstalledPackage[]
+	summary: string  // e.g. "Created User model; installed bcrypt"
+	errorMessage?: string
+}
+
+export interface AgentSessionState {
+	sessionId: string
+	workspaceRoot: string
+	startedAt: number
+	lastUpdated: number
+	// Cumulative across all tasks so far this session:
+	allCreatedFiles: string[]
+	allModifiedFiles: string[]
+	allInstalledPackages: InstalledPackage[]
+	taskOutcomes: TaskOutcome[]
+}
+
+export function createEmptySessionState(workspaceRoot: string): AgentSessionState {
+	return {
+		sessionId: `sess_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`,
+		workspaceRoot,
+		startedAt: Date.now(),
+		lastUpdated: Date.now(),
+		allCreatedFiles: [],
+		allModifiedFiles: [],
+		allInstalledPackages: [],
+		taskOutcomes: [],
+	}
+}
+
 // ======================== Plan Import ========================
 
 export interface PlanImportResult {

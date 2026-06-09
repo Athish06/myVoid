@@ -3,7 +3,7 @@ import { useState, useEffect } from 'react';
 import { useAccessor, useAgentPipelineState } from '../util/services.js'
 import { AgentTask, PipelinePhase, AgentPlan, TaskHistoryEntry } from '../../../../common/agentPipelineTypes.js'
 import { validatePlan, importPlanFromAI, formatPlanForExternalAI } from '../../../../common/planExportImport.js'
-import { Copy as CopyIcon, Pencil, Save, Trash2, Plus, ChevronDown, ChevronUp, ChevronRight, ListChecks, FileText, ArrowLeft, Bot, Loader2, Circle, CheckCircle2, XCircle, AlertTriangle, PauseCircle, PlayCircle, XOctagon, History, HelpCircle } from 'lucide-react'
+import { Copy as CopyIcon, Pencil, Save, Trash2, Plus, ChevronDown, ChevronUp, ChevronRight, ListChecks, FileText, ArrowLeft, Bot, Loader2, Circle, CheckCircle2, XCircle, AlertTriangle, PauseCircle, PlayCircle, XOctagon, History, HelpCircle, GripVertical } from 'lucide-react'
 
 export const AgentPipelinePanel = ({
 	className = ''
@@ -337,6 +337,7 @@ const PlanReviewPanel = ({
 
 const TaskEditorList = ({ plan, onUpdate }: { plan: AgentPlan, onUpdate: (p: AgentPlan) => void }) => {
 	const errors = validatePlan(plan.tasks)
+	const [draggedIndex, setDraggedIndex] = useState<number | null>(null)
 
 	const updateTask = (index: number, updates: Partial<AgentTask>) => {
 		const newTasks = [...plan.tasks]
@@ -348,21 +349,6 @@ const TaskEditorList = ({ plan, onUpdate }: { plan: AgentPlan, onUpdate: (p: Age
 		const newTasks = [...plan.tasks]
 		newTasks.splice(index, 1)
 		onUpdate({ ...plan, tasks: newTasks })
-	}
-
-	const moveTask = (index: number, direction: 'up' | 'down') => {
-		const newTasks = [...plan.tasks]
-		if (direction === 'up' && index > 0) {
-			const temp = newTasks[index - 1]
-			newTasks[index - 1] = newTasks[index]
-			newTasks[index] = temp
-			onUpdate({ ...plan, tasks: newTasks })
-		} else if (direction === 'down' && index < newTasks.length - 1) {
-			const temp = newTasks[index + 1]
-			newTasks[index + 1] = newTasks[index]
-			newTasks[index] = temp
-			onUpdate({ ...plan, tasks: newTasks })
-		}
 	}
 
 	const addTask = () => {
@@ -381,6 +367,32 @@ const TaskEditorList = ({ plan, onUpdate }: { plan: AgentPlan, onUpdate: (p: Age
 		})
 	}
 
+	const handleDragStart = (e: React.DragEvent, index: number) => {
+		setDraggedIndex(index)
+		e.dataTransfer.effectAllowed = 'move'
+		// Ghost image transparent
+		const img = new Image()
+		img.src = 'data:image/gif;base64,R0lGODlhAQABAIAAAAAAAP///yH5BAEAAAAALAAAAAABAAEAAAIBRAA7'
+		e.dataTransfer.setDragImage(img, 0, 0)
+	}
+
+	const handleDragOver = (e: React.DragEvent, index: number) => {
+		e.preventDefault()
+		if (draggedIndex === null || draggedIndex === index) return
+		
+		const newTasks = [...plan.tasks]
+		const draggedTask = newTasks[draggedIndex]
+		newTasks.splice(draggedIndex, 1)
+		newTasks.splice(index, 0, draggedTask)
+		
+		onUpdate({ ...plan, tasks: newTasks })
+		setDraggedIndex(index)
+	}
+
+	const handleDragEnd = () => {
+		setDraggedIndex(null)
+	}
+
 	return (
 		<div className="flex flex-col gap-1.5 overflow-y-auto pr-1 max-h-[50vh]">
 			{errors.length > 0 && (
@@ -395,11 +407,12 @@ const TaskEditorList = ({ plan, onUpdate }: { plan: AgentPlan, onUpdate: (p: Age
 						key={task.id} 
 						task={task} 
 						index={i}
-						isFirst={i === 0}
-						isLast={i === plan.tasks.length - 1}
+						isDragged={draggedIndex === i}
 						onUpdate={(u) => updateTask(i, u)} 
 						onDelete={() => deleteTask(i)}
-						onMove={(dir) => moveTask(i, dir)}
+						onDragStart={(e) => handleDragStart(e, i)}
+						onDragOver={(e) => handleDragOver(e, i)}
+						onDragEnd={handleDragEnd}
 					/>
 				))}
 			</div>
@@ -418,37 +431,48 @@ const TaskEditorList = ({ plan, onUpdate }: { plan: AgentPlan, onUpdate: (p: Age
 const TaskEditorItem = ({ 
 	task, 
 	index,
-	isFirst,
-	isLast,
+	isDragged,
 	onUpdate, 
 	onDelete,
-	onMove
+	onDragStart,
+	onDragOver,
+	onDragEnd
 }: { 
 	task: AgentTask, 
 	index: number,
-	isFirst: boolean,
-	isLast: boolean,
+	isDragged: boolean,
 	onUpdate: (u: Partial<AgentTask>) => void,
 	onDelete: () => void,
-	onMove: (dir: 'up' | 'down') => void
+	onDragStart: (e: React.DragEvent) => void,
+	onDragOver: (e: React.DragEvent) => void,
+	onDragEnd: () => void
 }) => {
 	const [isEditing, setIsEditing] = useState(false)
 
 	if (!isEditing) {
 		return (
-			<div className="group flex flex-col gap-0.5 p-1.5 bg-void-bg-1 border border-void-border-3 rounded hover:border-void-border-2 transition-colors">
+			<div 
+				className={`group flex flex-col gap-0.5 p-1.5 bg-void-bg-1 border rounded transition-all
+					${isDragged ? 'border-[#3794ff] opacity-50 scale-[0.98]' : 'border-void-border-3 hover:border-void-border-2'}
+				`}
+				draggable
+				onDragStart={onDragStart}
+				onDragOver={onDragOver}
+				onDragEnd={onDragEnd}
+			>
 				<div className="flex items-center justify-between">
 					<div className="text-[10px] font-medium text-void-fg-1 truncate flex items-center gap-1.5">
+						<div className="cursor-grab active:cursor-grabbing text-void-fg-4 hover:text-void-fg-2" title="Drag to reorder">
+							<GripVertical size={12} />
+						</div>
 						<span className="text-void-fg-4 font-mono">{index + 1}.</span> {task.title}
 					</div>
 					<div className="flex gap-0.5 text-void-fg-3">
-						{!isFirst && <button onClick={() => onMove('up')} className="hover:text-void-fg-1 p-0.5 bg-void-bg-2 rounded border border-void-border-3" title="Move Up"><ChevronUp size={10} /></button>}
-						{!isLast && <button onClick={() => onMove('down')} className="hover:text-void-fg-1 p-0.5 bg-void-bg-2 rounded border border-void-border-3" title="Move Down"><ChevronDown size={10} /></button>}
 						<button onClick={() => setIsEditing(true)} className="hover:text-void-fg-1 p-0.5 ml-1"><Pencil size={10} /></button>
 						<button onClick={onDelete} className="hover:text-void-error p-0.5"><Trash2 size={10} /></button>
 					</div>
 				</div>
-				<div className="text-[9px] text-void-fg-4 truncate">{task.description}</div>
+				<div className="text-[9px] text-void-fg-4 truncate pl-6">{task.description}</div>
 			</div>
 		)
 	}
@@ -510,19 +534,38 @@ const TaskExecutionPanel = ({
 		}
 	}
 
-	const moveTask = (index: number, direction: 'up' | 'down') => {
-		const newTasks = [...plan.tasks]
-		if (direction === 'up' && index > 0 && newTasks[index].status === 'pending' && newTasks[index - 1].status === 'pending') {
-			const temp = newTasks[index - 1]
-			newTasks[index - 1] = newTasks[index]
-			newTasks[index] = temp
-			onUpdatePlan({ ...plan, tasks: newTasks })
-		} else if (direction === 'down' && index < newTasks.length - 1 && newTasks[index].status === 'pending' && newTasks[index + 1].status === 'pending') {
-			const temp = newTasks[index + 1]
-			newTasks[index + 1] = newTasks[index]
-			newTasks[index] = temp
-			onUpdatePlan({ ...plan, tasks: newTasks })
+	const [draggedIndex, setDraggedIndex] = useState<number | null>(null)
+
+	const handleDragStart = (e: React.DragEvent, index: number) => {
+		if (!canReorder || plan.tasks[index].status !== 'pending') {
+			e.preventDefault()
+			return
 		}
+		setDraggedIndex(index)
+		e.dataTransfer.effectAllowed = 'move'
+		const img = new Image()
+		img.src = 'data:image/gif;base64,R0lGODlhAQABAIAAAAAAAP///yH5BAEAAAAALAAAAAABAAEAAAIBRAA7'
+		e.dataTransfer.setDragImage(img, 0, 0)
+	}
+
+	const handleDragOver = (e: React.DragEvent, index: number) => {
+		e.preventDefault()
+		if (draggedIndex === null || draggedIndex === index) return
+		
+		// Can only drop onto other pending tasks
+		if (plan.tasks[index].status !== 'pending') return
+
+		const newTasks = [...plan.tasks]
+		const draggedTask = newTasks[draggedIndex]
+		newTasks.splice(draggedIndex, 1)
+		newTasks.splice(index, 0, draggedTask)
+		
+		onUpdatePlan({ ...plan, tasks: newTasks })
+		setDraggedIndex(index)
+	}
+
+	const handleDragEnd = () => {
+		setDraggedIndex(null)
 	}
 
 	return (
@@ -538,29 +581,40 @@ const TaskExecutionPanel = ({
 			</div>
 
 			{/* Task list */}
-			<div className="flex flex-col gap-0.5 max-h-48 overflow-y-auto pt-1">
-				{plan.tasks.map((task: AgentTask, i: number) => (
-					<div 
-						key={task.id} 
-						className={`flex items-center gap-1.5 text-[10px] py-1 px-1.5 rounded transition-colors
-							${i === currentIndex && phase === 'executing' ? 'bg-void-bg-1 border border-void-border-3 text-void-fg-1 font-medium' : 'border border-transparent'}
-							${task.status === 'done' ? 'text-void-fg-4 opacity-60' : 'text-void-fg-2'}
-						`}
-					>
-						<div className="flex-shrink-0">{renderStatus(task.status)}</div>
-						<div className="truncate flex-grow">{task.title}</div>
-						{canReorder && task.status === 'pending' && (
-							<div className="flex gap-0.5 flex-shrink-0">
-								{i > 0 && plan.tasks[i - 1]?.status === 'pending' && (
-									<button onClick={() => moveTask(i, 'up')} className="text-void-fg-4 hover:text-void-fg-1 p-0.5"><ChevronUp size={10} /></button>
+			<div className="flex flex-col gap-1.5 max-h-48 overflow-y-auto pt-1 pr-1">
+				{plan.tasks.map((task: AgentTask, i: number) => {
+					const isPending = task.status === 'pending'
+					const isDragged = draggedIndex === i
+					
+					return (
+						<div 
+							key={task.id} 
+							className={`flex flex-col gap-0.5 p-1.5 border rounded transition-all
+								${i === currentIndex && phase === 'executing' ? 'bg-[#3794ff]/10 border-[#3794ff]/30 text-void-fg-1' : 'bg-void-bg-1 border-void-border-3'}
+								${task.status === 'done' ? 'opacity-60' : ''}
+								${isDragged ? 'border-[#3794ff] opacity-50 scale-[0.98]' : ''}
+							`}
+							draggable={canReorder && isPending}
+							onDragStart={(e) => handleDragStart(e, i)}
+							onDragOver={(e) => handleDragOver(e, i)}
+							onDragEnd={handleDragEnd}
+						>
+							<div className="flex items-center gap-1.5">
+								{canReorder && isPending ? (
+									<div className="cursor-grab active:cursor-grabbing text-void-fg-4 hover:text-void-fg-2 flex-shrink-0" title="Drag to reorder">
+										<GripVertical size={12} />
+									</div>
+								) : (
+									<div className="flex-shrink-0 w-3"></div>
 								)}
-								{i < plan.tasks.length - 1 && plan.tasks[i + 1]?.status === 'pending' && (
-									<button onClick={() => moveTask(i, 'down')} className="text-void-fg-4 hover:text-void-fg-1 p-0.5"><ChevronDown size={10} /></button>
-								)}
+								<div className="flex-shrink-0">{renderStatus(task.status)}</div>
+								<div className="text-[10px] font-medium text-void-fg-1 truncate flex-grow flex items-center gap-1.5">
+									<span className="text-void-fg-4 font-mono">{i + 1}.</span> {task.title}
+								</div>
 							</div>
-						)}
-					</div>
-				))}
+						</div>
+					)
+				})}
 			</div>
 
 			{/* Controls */}

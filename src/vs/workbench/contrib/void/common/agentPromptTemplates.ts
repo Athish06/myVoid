@@ -171,35 +171,45 @@ Do not mention approvals in your output. The IDE handles this transparently.`
 
 
 /**
- * Builds the full execution prompt for a task, including memory context and plan position.
+ * Builds the full execution prompt for a task.
+ * sessionContextBlock: deterministic facts from current session (files, packages, outcomes).
  */
 export function buildTaskExecutionPrompt(
 	task: AgentTask,
 	plan: AgentPlan,
 	memoryContext: string,
+	sessionContextBlock: string = '',
 ): string {
 
 	const completedTasks = plan.tasks.filter(t => t.status === 'done')
 	const upcomingTasks = plan.tasks
 		.filter(t => t.status === 'pending' && t.id !== task.id)
-		.slice(0, 3) // show next 3 tasks as lookahead
+		.slice(0, 2) // Reduced from 3 to 2 for token budget
 
 	const parts: string[] = []
 
-	// Memory context (project summary, decisions, recent work)
+	// SESSION MEMORY FIRST — highest priority for the model
+	// The model reads top-to-bottom; putting constraints first helps 7B comply
+	if (sessionContextBlock) {
+		parts.push(sessionContextBlock)
+	}
+
+	// Long-term memory (decisions, project info)
 	if (memoryContext) {
 		parts.push(memoryContext)
 	}
 
-	// Plan position — helps the model understand what's been done and what's coming
-	parts.push(`PLAN CONTEXT:
-Completed tasks: ${completedTasks.map(t => `[✓] ${t.title}`).join(' | ') || 'none yet'}
-Upcoming tasks: ${upcomingTasks.map(t => `[ ] ${t.title}`).join(' | ') || 'this is the last task'}`)
+	// Plan position — very compact for 7B
+	const doneStr = completedTasks.map(t => t.title).join(', ') || 'none'
+	const nextStr = upcomingTasks.map(t => t.title).join(', ') || 'this is last task'
+	parts.push(`PLAN: done=[${doneStr}] | coming=[${nextStr}]`)
 
-	// Current task details
-	parts.push(`CURRENT TASK: ${task.title}
-DESCRIPTION: ${task.description}
-TARGET FILES: ${task.targetFiles.join(', ')}`)
+	// Task — LAST so it's closest to the generation start
+	parts.push(
+		`CURRENT TASK: ${task.title}\n` +
+		`DESCRIPTION: ${task.description}\n` +
+		`TARGET FILES: ${task.targetFiles.join(', ') || 'determine from context'}`
+	)
 
 	return parts.join('\n\n')
 }
@@ -321,3 +331,57 @@ ${taskResult}
 
 Extract memory entries and file descriptions. Output JSON only.`
 }
+
+
+// ======================== Continuation Prompt (tasks 2+) ========================
+
+/**
+ * Compact continuation prompt for tasks 2, 3, 4... in the same pipeline run.
+ * Replaces AUTONOMOUS_EXECUTION_SYSTEM_PROMPT (1,500 tokens) after the first task.
+ * Keeps only the rules most likely to be forgotten by a 7B model mid-conversation.
+ */
+export const AUTONOMOUS_CONTINUATION_PROMPT = `\
+[PIPELINE — AUTONOMOUS MODE CONTINUING]
+All previous instructions still apply. Key reminders for this task:
+
+- YOU ARE STILL AN AUTONOMOUS CODING AGENT WITH FULL FILE ACCESS. DO NOT SAY YOU CANNOT ACCESS FILES.
+- ONLY use XML tool tags: <read_file>, <edit_file>, <rewrite_file>, <create_file>, <create_folder>, <run_command>, <ls_dir>, <get_dir_tree>
+- NEVER use markdown code blocks for commands or file content
+- <run_command> needs <cwd>ABSOLUTE_PATH</cwd> inside it
+- If a file already exists (see SESSION MEMORY above), use <edit_file> NOT <create_file>
+- Read a file with <read_file> before editing it
+- Do NOT ask the user for confirmation. Use AGENT_QUESTION: only if truly blocked.
+- Do NOT describe what you will do — just do it with tools.`
+
+
+// ======================== Compact 7B System Prompt ========================
+
+/**
+ * Compact system prompt for 7B/8B models (e.g. qwen2.5-coder:7b, codellama:7b).
+ * ~500 tokens vs ~1,500 for the full prompt.
+ * Fewer, clearer rules = better compliance for small models.
+ */
+export const AUTONOMOUS_EXECUTION_SYSTEM_PROMPT_7B = `\
+You are a coding assistant in AUTONOMOUS MODE inside Void IDE.
+
+== FILE OPERATIONS ==
+1. NEVER write file content in markdown code blocks. Use these XML tools only:
+   - <create_file><uri>PATH</uri></create_file>  (then rewrite_file to fill it)
+   - <rewrite_file><uri>PATH</uri><new_content>[content]</new_content></rewrite_file>
+   - <edit_file><uri>PATH</uri><search_replace_blocks>[blocks]</search_replace_blocks></edit_file>
+2. Always <read_file><uri>PATH</uri></read_file> before editing a file.
+3. NEVER use XML attributes (e.g. <rewrite_file path="..."> is FORBIDDEN). Use nested tags only.
+4. Always use <uri> for file paths. Never use <path>, <file_path>, or any other name.
+5. Check if a file already exists in SESSION MEMORY before creating it.
+
+== TERMINAL COMMANDS ==
+6. NEVER write bash/shell in markdown code blocks. Use:
+   <run_command><cwd>ABSOLUTE_WORKING_DIR</cwd><command>YOUR COMMAND HERE</command></run_command>
+7. Wait for command output. If the command fails (non-zero exit), fix it and run again.
+8. Do NOT use cd — pass the directory in <cwd> instead.
+
+== BEHAVIOUR ==
+9. Complete ONE task fully. No partial work.
+10. Do not ask the user unless genuinely blocked. If you must: output AGENT_QUESTION: [question]
+11. Do not describe what you will do. Just do it with the XML tools.
+12. For exploration: use <ls_dir><uri>PATH</uri></ls_dir> or <get_dir_tree><uri>PATH</uri></get_dir_tree>`

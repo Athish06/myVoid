@@ -22,7 +22,7 @@ import {
 	buildPromptRefinerUserMessage, buildTaskGeneratorUserMessage,
 	buildTaskExecutionPrompt, AUTONOMOUS_EXECUTION_SYSTEM_PROMPT,
 	REPLAN_SYSTEM_PROMPT, buildReplanUserMessage,
-	TASK_MEMORY_EXTRACTOR_SYSTEM,
+	AUTONOMOUS_CONTINUATION_PROMPT, AUTONOMOUS_EXECUTION_SYSTEM_PROMPT_7B,
 } from '../common/agentPromptTemplates.js'
 import { autoSplitOversizedTasks } from '../common/planExportImport.js'
 import { ModelSelection, ProviderName } from '../common/voidSettingsTypes.js'
@@ -175,6 +175,11 @@ class AgentPipelineService extends Disposable implements IAgentPipelineService {
 		// Load memory at the start
 		await this._memoryStore.load()
 
+		// Initialize session state (deterministic, resets per pipeline run)
+		const workspaceFolders_ = this._workspaceContextService?.getWorkspace?.()?.folders || []
+		const workspaceRoot_ = workspaceFolders_.length > 0 ? workspaceFolders_[0].uri.fsPath : ''
+		await this._memoryStore.startSession(workspaceRoot_)
+
 		if (clearOldPlan) {
 			this._setState({
 				...DEFAULT_PIPELINE_STATE,
@@ -191,7 +196,7 @@ class AgentPipelineService extends Disposable implements IAgentPipelineService {
 		try {
 			const forceplan = this._settingsService.state.globalSettings.agentForceExecutionPlan
 			if (forceplan === true || forceplan === 'my_plan') {
-				await this._runPlanningPhase(userPrompt, !clearOldPlan, forceplan === 'my_plan')
+				await this._runPlanningPhase(this.state.originalPrompt, !clearOldPlan, forceplan === 'my_plan')
 			} else {
 				// Plan is OFF — skip planning, create single-task plan and execute directly
 				const directoryStr = await this._directoryStrService.getAllDirectoriesStr({
@@ -241,10 +246,23 @@ class AgentPipelineService extends Disposable implements IAgentPipelineService {
 			return
 		}
 
-		// Get workspace context for prompt refinement
-		const directoryStr = await this._directoryStrService.getAllDirectoriesStr({
-			cutOffMessage: '...Directories cut off, use tools to read more...'
-		})
+		this._chatThreadService.setPipelinePlanningRunning(this._chatThreadService.state.currentThreadId, true)
+
+		try {
+			// Get workspace context for prompt refinement
+			const directoryStr = await this._directoryStrService.getAllDirectoriesStr({
+				cutOffMessage: '...Directories cut off, use tools to read more...'
+			})
+
+		// Split userPrompt into instructions and selections (if any)
+		// The UI appends file contents using "\n---\nSELECTIONS\n"
+		let instructions = userPrompt
+		let selectionsStr = ''
+		const sepMatch = userPrompt.match(/\n---\nSELECTIONS\n/i)
+		if (sepMatch && sepMatch.index !== undefined) {
+			instructions = userPrompt.substring(0, sepMatch.index)
+			selectionsStr = userPrompt.substring(sepMatch.index)
+		}
 
 		// Step 1: Refine the prompt (non-fatal — if it fails, use raw prompt)
 		this._setState({ executionLog: 'Refining your prompt...' })
@@ -254,14 +272,15 @@ class AgentPipelineService extends Disposable implements IAgentPipelineService {
 
 		const refinedResult = await this._callLLMForJSON(
 			PROMPT_REFINER_SYSTEM,
-			buildPromptRefinerUserMessage(userPrompt, directoryStr),
+			buildPromptRefinerUserMessage(instructions, directoryStr),
 			modelSelection,
 		)
 
 		if (refinedResult) {
 			try {
 				const parsed = JSON.parse(refinedResult)
-				refinedPrompt = parsed.refinedPrompt || userPrompt
+				// Re-attach the selections to the refined instructions
+				refinedPrompt = (parsed.refinedPrompt || instructions) + selectionsStr
 				projectSummary = parsed.projectSummary || ''
 				techStack = Array.isArray(parsed.techStack) ? parsed.techStack : []
 			} catch {
@@ -366,6 +385,10 @@ class AgentPipelineService extends Disposable implements IAgentPipelineService {
 			currentPlan: plan,
 			executionLog: '',
 		})
+
+		} finally {
+			this._chatThreadService.setPipelinePlanningRunning(this._chatThreadService.state.currentThreadId, false)
+		}
 	}
 
 	// ======================== Plan Review ========================
@@ -447,9 +470,10 @@ class AgentPipelineService extends Disposable implements IAgentPipelineService {
 			this._setState({ currentTaskIndex: taskIndex, executionLog: '' })
 			this._updatePlanTasks(plan)
 
-			// Build context with memory
-			const memoryContext = this._memoryStore.buildContextString(task)
-			const executionPrompt = buildTaskExecutionPrompt(task, plan, memoryContext)
+			// Build context with memory + session state
+			const memoryContext = this._memoryStore.buildContextString(task, 350)
+			const sessionContextBlock = this._memoryStore.buildSessionContextBlock()
+			const executionPrompt = buildTaskExecutionPrompt(task, plan, memoryContext, sessionContextBlock)
 
 			// Get the workspace root
 			const workspaceFolders = this._workspaceContextService?.getWorkspace?.()?.folders || []
@@ -457,8 +481,23 @@ class AgentPipelineService extends Disposable implements IAgentPipelineService {
 				? `Your root workspace directory is: ${workspaceFolders[0].uri.fsPath}\nUse this as the cwd for all terminal commands unless instructed otherwise.` 
 				: 'No workspace folder is open.'
 
+			// Detect model size for prompt selection
+			const modelName = (modelSelection?.modelName || '').toLowerCase()
+			const isSmallModel = /7b|8b|3b|1b|:7b|:8b|:3b|:1b/.test(modelName)
+
+			// First task gets the full system prompt (7B or standard).
+			// Subsequent tasks get a compact continuation to avoid attention dilution.
+			const isFirstTask = plan.tasks.filter(t => t.status === 'done').length === 0
+
+			const systemPromptToUse = isSmallModel
+				? AUTONOMOUS_EXECUTION_SYSTEM_PROMPT_7B
+				: AUTONOMOUS_EXECUTION_SYSTEM_PROMPT
+
+			const preamble = isFirstTask
+				? `${systemPromptToUse}\n\n${workspaceRootMsg}`
+				: `${AUTONOMOUS_CONTINUATION_PROMPT}\n\n${workspaceRootMsg}`
+
 			// Execute the task by sending to the chat thread service as a user message
-			// Prefix with __PIPELINE_HIDDEN__ so the UI can hide this from display
 			try {
 				const threadId = this._chatThreadService.state.currentThreadId
 				
@@ -471,7 +510,7 @@ class AgentPipelineService extends Disposable implements IAgentPipelineService {
 					})
 				} else {
 					await this._chatThreadService.addUserMessageAndStreamResponse({
-						userMessage: `__PIPELINE_HIDDEN__\n${AUTONOMOUS_EXECUTION_SYSTEM_PROMPT}\n\n${workspaceRootMsg}\n\n${executionPrompt}`,
+						userMessage: `__PIPELINE_HIDDEN__\n${preamble}\n\n${executionPrompt}`,
 						threadId,
 					})
 				}
@@ -515,8 +554,8 @@ class AgentPipelineService extends Disposable implements IAgentPipelineService {
 					recentLog = JSON.stringify(thread.messages.slice(-5));
 				}
 
-				// Extract and store memory
-				await this._extractMemory(task, recentLog)
+				// Extract and store memory (deterministic + async LLM for decisions)
+				await this._extractMemory(task, recentLog, threadId)
 
 			} catch (error) {
 				const errorMsg = error instanceof Error ? error.message : String(error)
@@ -675,32 +714,68 @@ class AgentPipelineService extends Disposable implements IAgentPipelineService {
 		return result
 	}
 
-	// ======================== Memory Extraction ========================
+	/**
+	 * Deterministic memory extraction from tool calls + fire-and-forget async LLM for architectural decisions.
+	 * The deterministic parser handles all "what" facts (files, packages).
+	 * The async LLM only handles "why" decisions (non-blocking, never delays next task).
+	 */
+	private async _extractMemory(task: AgentTask, _taskResult: string, threadId: string): Promise<void> {
+		// Step A: Deterministic extraction from tool calls in the agent's messages
+		const thread = this._chatThreadService.state.allThreads[threadId]
+		const recentMessages = thread?.messages?.slice(-12) || []
 
-	private async _extractMemory(task: AgentTask, taskResult: string): Promise<void> {
-		const modelSelection = this.getPlanningModelSelection()
-		let summaryText = `${task.title}: ${task.description.slice(0, 100)}`
-		
-		if (modelSelection) {
-			const prompt = `TASK: ${task.title}\nDESCRIPTION: ${task.description}\n\nEXECUTION LOG:\n${taskResult.slice(-2000)}\n\nExtract the side-effects of this task as instructed.`
-			const result = await this._callLLMForJSON(TASK_MEMORY_EXTRACTOR_SYSTEM, prompt, modelSelection)
-			if (result) {
-				summaryText = result.trim()
-			}
-		}
+		// Concatenate all assistant output from this task's messages
+		const agentOutputText = recentMessages
+			.filter(m => m.role === 'assistant')
+			.map(m => m.displayContent || '')
+			.join('\n')
 
-		await this._memoryStore.addEntry({
-			text: summaryText,
-			type: task.taskType === 'create' ? 'file_created' : 'fix',
-			taskId: task.id,
-		})
+		// This is deterministic — no LLM call, no summarisation errors
+		const outcome = await this._memoryStore.recordTaskOutcome(task, agentOutputText)
 
-		// Update file index for files that were touched
+		// Step B: Update the file index in long-term memory
 		const fileUpdates: Record<string, string> = {}
-		for (const f of task.targetFiles) {
+		for (const f of [...outcome.filesCreated, ...outcome.filesModified]) {
 			fileUpdates[f] = task.title
 		}
-		await this._memoryStore.updateFileIndex(fileUpdates)
+		if (Object.keys(fileUpdates).length > 0) {
+			await this._memoryStore.updateFileIndex(fileUpdates)
+		}
+
+		// Step C: Add a compact entry to long-term memory store
+		if (outcome.summary) {
+			await this._memoryStore.addEntry({
+				text: outcome.summary,
+				type: task.taskType === 'create' ? 'file_created' : 'fix',
+				taskId: task.id,
+			})
+		}
+
+		// Step D: Fire-and-forget async LLM for architectural decisions only.
+		// Non-blocking — never delays the next task.
+		const modelSelection = this.getPlanningModelSelection()
+		if (modelSelection && outcome.filesCreated.length > 0) {
+			this._callLLMForJSON(
+				`You detect architectural decisions from coding tasks.
+Output ONLY valid JSON: { "decision": "one sentence about any important design choice, or null if none" }
+Only extract a decision if there was a genuinely important architectural choice (framework, pattern, schema design).
+Do NOT describe what files were created — the file list is already tracked elsewhere.`,
+				`TASK: ${task.title}\nFILES CREATED: ${outcome.filesCreated.join(', ')}\nSUMMARY: ${outcome.summary}`,
+				modelSelection,
+			).then(result => {
+				if (!result) return
+				try {
+					const parsed = JSON.parse(result)
+					if (parsed.decision && typeof parsed.decision === 'string') {
+						this._memoryStore.addEntry({
+							text: parsed.decision,
+							type: 'decision',
+							taskId: task.id,
+						})
+					}
+				} catch { /* non-fatal */ }
+			})
+		}
 	}
 
 	// ======================== Execution Control ========================

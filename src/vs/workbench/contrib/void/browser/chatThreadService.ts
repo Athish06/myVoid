@@ -29,6 +29,7 @@ import { findLast, findLastIdx } from '../../../../base/common/arraysFind.js';
 import { IEditCodeService } from './editCodeServiceInterface.js';
 import { VoidFileSnapshot } from '../common/editCodeServiceTypes.js';
 import { classifyVoidToolCall } from '../common/operationClassifier.js';
+import { IAgentAssistService } from './agentAssistService.js';
 
 import { INotificationService, Severity } from '../../../../platform/notification/common/notification.js';
 import { truncate } from '../../../../base/common/strings.js';
@@ -165,6 +166,7 @@ class ChatThreadService extends Disposable implements IChatThreadService {
 		@IFileService private readonly _fileService: IFileService,
 		@IMCPService private readonly _mcpService: IMCPService,
 		@IMemoryStore private readonly _memoryStore: IMemoryStore,
+		@IAgentAssistService private readonly _agentAssistService: IAgentAssistService,
 	) {
 		super()
 		this.state = { allThreads: {}, currentThreadId: null as unknown as string } // default state
@@ -442,45 +444,67 @@ class ChatThreadService extends Disposable implements IChatThreadService {
 	// returns true when the tool call is waiting for user approval
 	private _runToolCall = async (
 		threadId: string,
-		toolName: ToolName,
+		_toolName: ToolName,
 		toolId: string,
 		mcpServerName: string | undefined,
 		opts: { preapproved: true, unvalidatedToolParams: RawToolParamsObj, validatedParams: ToolCallParams<ToolName> } | { preapproved: false, unvalidatedToolParams: RawToolParamsObj },
 	): Promise<{ awaitingUserApproval?: boolean, interrupted?: boolean }> => {
 
 		// compute these below
+		let toolName: ToolName = _toolName // mutable: Assist Service may change this
 		let toolParams: ToolCallParams<ToolName>
 		let toolResult: ToolResult<ToolName>
 		let toolResultStr: string
 
-		// Check if it's a built-in tool
-		const isBuiltInTool = isABuiltinToolName(toolName)
+		// Note: isBuiltInTool check is done after Assist Service runs (see isCorrectedBuiltIn below)
 
 
 		if (!opts.preapproved) { // skip this if pre-approved
-			// 1. validate tool params
+			// 0. Agent Assist Service: intercept, validate, repair, translate
+			const assistResult = this._agentAssistService.processToolCall(toolName, opts.unvalidatedToolParams)
+
+			// If the Assist Service blocked this call entirely (e.g., standalone 'cd')
+			if (assistResult.blocked) {
+				this._addMessageToThread(threadId, { role: 'tool', type: 'invalid_params', rawParams: opts.unvalidatedToolParams, result: null, name: toolName, content: assistResult.blockReason || 'Tool call was blocked by the Assist Service.', id: toolId, mcpServerName })
+				return {}
+			}
+
+			// Apply corrections from the Assist Service
+			toolName = assistResult.toolName as ToolName
+			const correctedParams = assistResult.params
+
+			// Log repairs (minimal, internal only)
+			if (assistResult.repairs.length > 0) {
+				console.log(`[AgentAssist] Applied ${assistResult.repairs.length} repair(s) to ${toolName}:`, assistResult.repairs.map(r => r.description))
+			}
+
+			// Re-check if the corrected tool name is a built-in tool
+			const isCorrectedBuiltIn = isABuiltinToolName(toolName)
+
+			// 1. validate tool params (using corrected name and params)
 			try {
-				if (isBuiltInTool) {
-					const params = this._toolsService.validateParams[toolName](opts.unvalidatedToolParams)
+				if (isCorrectedBuiltIn) {
+					const params = (this._toolsService.validateParams as any)[toolName](correctedParams)
 					toolParams = params
 				}
 				else {
-					toolParams = opts.unvalidatedToolParams
+					toolParams = correctedParams
 				}
 			}
 			catch (error) {
 				const errorMessage = getErrorMessage(error)
-				this._addMessageToThread(threadId, { role: 'tool', type: 'invalid_params', rawParams: opts.unvalidatedToolParams, result: null, name: toolName, content: errorMessage, id: toolId, mcpServerName })
+				this._addMessageToThread(threadId, { role: 'tool', type: 'invalid_params', rawParams: correctedParams, result: null, name: toolName, content: errorMessage, id: toolId, mcpServerName })
 				return {}
 			}
 			// once validated, no longer adding checkpoints per tool edit
 			// checkpoints will now only be created per prompt
 			// 2. if tool requires approval, break from the loop, awaiting approval
 
-			const approvalType = isBuiltInTool ? approvalTypeOfBuiltinToolName[toolName] : 'MCP tools'
+			const isFinalBuiltIn = isABuiltinToolName(toolName)
+			const approvalType = isFinalBuiltIn ? (approvalTypeOfBuiltinToolName as any)[toolName] : 'MCP tools'
 			if (approvalType) {
-				let autoApprove = this._settingsService.state.globalSettings.autoApprove[approvalType]
-				if (this._pipelineAutoApproveActive && isBuiltInTool) {
+				let autoApprove = this._settingsService.state.globalSettings.autoApprove[approvalType as keyof typeof this._settingsService.state.globalSettings.autoApprove]
+				if (this._pipelineAutoApproveActive && isFinalBuiltIn) {
 					const classification = classifyVoidToolCall(toolName, toolParams)
 					autoApprove = !classification.requiresApproval
 				}
@@ -515,7 +539,7 @@ class ChatThreadService extends Disposable implements IChatThreadService {
 			// set stream state
 			this._setStreamState(threadId, { isRunning: 'tool', interrupt: interruptorPromise, toolInfo: { toolName, toolParams, id: toolId, content: 'interrupted...', rawParams: opts.unvalidatedToolParams, mcpServerName } })
 
-			if (isBuiltInTool) {
+			if (isABuiltinToolName(toolName)) {
 				const { result, interruptTool } = await this._toolsService.callTool[toolName](toolParams as any)
 				const interruptor = () => { interrupted = true; interruptTool?.() }
 				resolveInterruptor(interruptor)
@@ -549,7 +573,7 @@ class ChatThreadService extends Disposable implements IChatThreadService {
 
 		// 4. stringify the result to give to the LLM
 		try {
-			if (isBuiltInTool) {
+			if (isABuiltinToolName(toolName)) {
 				toolResultStr = this._toolsService.stringOfResult[toolName](toolParams as any, toolResult as any)
 			}
 			// For MCP tools, handle the result based on its type
@@ -1196,6 +1220,29 @@ We only need to do it for files that were edited since `from`, ie files between 
 		// Now call the original method to add the user message and stream the response
 		await this._addUserMessageAndStreamResponse({ userMessage, _chatSelections, threadId });
 
+	}
+
+	setPipelinePlanningRunning(threadId: string, isRunning: boolean): void {
+		if (isRunning) {
+			this._setStreamState(threadId, {
+				isRunning: 'idle',
+				interrupt: 'not_needed',
+			});
+			// To make the UI show 'generating', we can temporarily set it to LLM with empty string
+			// Actually, wait! The UI shows 'Generating' if isRunning === 'LLM' OR toolIsGenerating.
+			// Let's set it to LLM so the spinner shows.
+			this._setStreamState(threadId, {
+				isRunning: 'LLM',
+				llmInfo: {
+					displayContentSoFar: '',
+					reasoningSoFar: '',
+					toolCallSoFar: null,
+				},
+				interrupt: new Promise(() => {}),
+			});
+		} else {
+			this._setStreamState(threadId, undefined);
+		}
 	}
 
 	editUserMessageAndStreamResponse: IChatThreadService['editUserMessageAndStreamResponse'] = async ({ userMessage, messageIdx, threadId }) => {

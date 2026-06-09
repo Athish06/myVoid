@@ -76,8 +76,8 @@ export type BuiltinToolResultType = {
 	// ---
 	'rewrite_file': Promise<{ lintErrors: LintErrorItem[] | null }>,
 	'edit_file': Promise<{ lintErrors: LintErrorItem[] | null }>,
-	'create_file': {},
-	'create_folder': {},
+	'create_file': { message?: string },
+	'create_folder': { message?: string },
 	'delete_file_or_folder': {},
 	// ---
 	'run_command': { result: string; resolveReason: TerminalResolveReason; },

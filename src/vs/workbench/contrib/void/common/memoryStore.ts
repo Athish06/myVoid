@@ -10,7 +10,8 @@ import { createDecorator } from '../../../../platform/instantiation/common/insta
 import { IFileService } from '../../../../platform/files/common/files.js'
 import { IWorkspaceContextService } from '../../../../platform/workspace/common/workspace.js'
 import { VSBuffer } from '../../../../base/common/buffer.js'
-import { AgentTask, MemoryEntry, ProjectMemory, TaskHistoryEntry } from './agentPipelineTypes.js'
+import { AgentTask, AgentSessionState, MemoryEntry, ProjectMemory, TaskHistoryEntry, TaskOutcome, createEmptySessionState } from './agentPipelineTypes.js'
+import { parseToolCallsFromText, buildTaskSummary } from './toolCallParser.js'
 
 const MEMORY_DIR = '.void'
 const MEMORY_FILE = 'memory.json'
@@ -31,6 +32,11 @@ export interface IMemoryStore {
 	archiveCompletedTasks(tasks: AgentTask[]): Promise<void>
 	buildContextString(taskContext: AgentTask, maxTokens?: number): string
 	clearMemory(): Promise<void>
+	// Session state management (deterministic, per-pipeline)
+	startSession(workspaceRoot: string): Promise<void>
+	recordTaskOutcome(task: AgentTask, agentOutputText: string): Promise<TaskOutcome>
+	getSessionState(): AgentSessionState | null
+	buildSessionContextBlock(): string
 }
 
 export const IMemoryStore = createDecorator<IMemoryStore>('AgentMemoryStore')
@@ -59,11 +65,41 @@ function truncateToTokenBudget(text: string, maxTokens: number): string {
 	return text.slice(0, maxChars - 3) + '...'
 }
 
+/**
+ * Adaptive prune: given context parts, trim to fit the token budget.
+ * Prunes in priority order (lowest priority dropped first):
+ *   1. Drop past session history (last part, least priority)
+ *   2. Drop file index
+ *   3. Keep decisions + summary always
+ */
+function adaptivePrune(parts: string[], maxTokens: number): string {
+	// Try all parts first
+	let full = parts.join('\n\n')
+	if (estimateTokens(full) <= maxTokens) return full
+
+	// Drop past session history (last part added, least priority)
+	if (parts.length > 1) {
+		const withoutHistory = parts.slice(0, -1).join('\n\n')
+		if (estimateTokens(withoutHistory) <= maxTokens) return withoutHistory
+	}
+
+	// Drop file index too
+	if (parts.length > 2) {
+		const withoutFileIndex = parts.slice(0, -2).join('\n\n')
+		if (estimateTokens(withoutFileIndex) <= maxTokens) return withoutFileIndex
+	}
+
+	// Last resort: truncate to just the first 2 parts (project + stack)
+	return truncateToTokenBudget(parts.slice(0, 2).join('\n\n'), maxTokens)
+}
+
 export class MemoryStore extends Disposable implements IMemoryStore {
 	readonly _serviceBrand: undefined
 
 	private memory: ProjectMemory = createEmptyMemory()
 	private memoryURI: URI | null = null
+	private sessionState: AgentSessionState | null = null
+	private sessionStateURI: URI | null = null
 
 	constructor(
 		@IFileService private readonly _fileService: IFileService,
@@ -165,11 +201,12 @@ export class MemoryStore extends Disposable implements IMemoryStore {
 	}
 
 	/**
-	 * Builds a context string from memory, tailored for the current task.
-	 * Type-aware selection: always includes decisions/architecture,
-	 * drops oldest file_created entries first.
+	 * Builds a context string from LONG-TERM memory, tailored for the current task.
+	 * Reduced token budget: session state (buildSessionContextBlock) now covers "what happened this run".
+	 * This method focuses on CROSS-SESSION knowledge only: project summary, tech stack,
+	 * architectural decisions, file index for target files, and past session history.
 	 */
-	buildContextString(taskContext: AgentTask, maxTokens = 800): string {
+	buildContextString(taskContext: AgentTask, maxTokens = 350): string {
 		const memory = this.memory
 		const parts: string[] = []
 
@@ -181,42 +218,170 @@ export class MemoryStore extends Disposable implements IMemoryStore {
 			parts.push(`STACK: ${memory.techStack.join(', ')}`)
 		}
 
-		// Always include architecture decisions (last 5 max):
+		// Architectural decisions — always include, these affect all code
 		const decisions = memory.entries
 			.filter(e => e.type === 'decision' || e.type === 'architecture')
-			.slice(-5)
-			.map(e => `• ${e.text}`)
+			.slice(-4)
+			.map(e => `  - ${e.text}`)
 		if (decisions.length) {
-			parts.push(`KEY DECISIONS:\n${decisions.join('\n')}`)
+			parts.push(`KEY DECISIONS (follow these):\n${decisions.join('\n')}`)
 		}
 
-		// Files touched by current task only:
+		// Files relevant to THIS task specifically — help the model know they exist
 		const relevantFiles = taskContext.targetFiles
 			.filter(f => memory.fileIndex[f])
-			.map(f => `${f} → ${memory.fileIndex[f]}`)
+			.map(f => `  ${f}: ${memory.fileIndex[f]}`)
 		if (relevantFiles.length) {
-			parts.push(`RELEVANT FILES:\n${relevantFiles.join('\n')}`)
+			parts.push(`RELEVANT FILES (read before editing):\n${relevantFiles.join('\n')}`)
 		}
 
-		// Recent completed work from this plan (last 4 only):
-		const recentWork = memory.entries
-			.filter(e => e.type === 'file_created' || e.type === 'fix')
-			.slice(-4)
-			.map(e => `[done] ${e.text}`)
-		if (recentWork.length) {
-			parts.push(`RECENT WORK (This Session):\n${recentWork.join('\n')}`)
-		}
-
-		// Historical tasks from past plans:
+		// Past session history — only include if there's no session state already covering it
 		const history = (memory.taskHistory || [])
-			.slice(-5)
-			.map(t => `[${t.status}] ${t.title}${t.result ? ` - ${t.result}` : ''}`)
+			.slice(-3)
+			.map(t => `  [${t.status}] ${t.title}`)
 		if (history.length) {
-			parts.push(`PAST TASKS (Previous Sessions):\n${history.join('\n')}`)
+			parts.push(`FROM PREVIOUS SESSIONS:\n${history.join('\n')}`)
 		}
 
-		const full = parts.join('\n\n')
-		return truncateToTokenBudget(full, maxTokens)
+		// NOTE: "RECENT WORK (This Session)" is no longer included here.
+		// That is covered by buildSessionContextBlock() with exact paths.
+
+		return adaptivePrune(parts, maxTokens)
+	}
+
+	// ======================== Session State (Deterministic) ========================
+
+	async startSession(workspaceRoot: string): Promise<void> {
+		this.sessionState = createEmptySessionState(workspaceRoot)
+		const uri = this._getMemoryURI()
+		if (uri) {
+			this.sessionStateURI = URI.joinPath(uri, '..', 'session_state.json')
+			await this._saveSessionState()
+		}
+	}
+
+	async recordTaskOutcome(task: AgentTask, agentOutputText: string): Promise<TaskOutcome> {
+		if (!this.sessionState) return this._makeEmptyOutcome(task)
+
+		const parsed = parseToolCallsFromText(agentOutputText, task.id)
+		const summary = buildTaskSummary(task.title, parsed)
+
+		const outcome: TaskOutcome = {
+			taskId: task.id,
+			title: task.title,
+			status: 'done',
+			filesCreated: parsed.filesCreated,
+			filesModified: parsed.filesModified,
+			packagesInstalled: parsed.packagesInstalled,
+			summary,
+		}
+
+		// Accumulate into session-wide lists (deduplicated)
+		for (const f of parsed.filesCreated) {
+			if (!this.sessionState.allCreatedFiles.includes(f)) {
+				this.sessionState.allCreatedFiles.push(f)
+			}
+		}
+		for (const f of parsed.filesModified) {
+			if (!this.sessionState.allModifiedFiles.includes(f) &&
+				!this.sessionState.allCreatedFiles.includes(f)) {
+				this.sessionState.allModifiedFiles.push(f)
+			}
+		}
+		for (const pkg of parsed.packagesInstalled) {
+			const exists = this.sessionState.allInstalledPackages
+				.some(p => p.manager === pkg.manager && p.name === pkg.name)
+			if (!exists) this.sessionState.allInstalledPackages.push(pkg)
+		}
+
+		this.sessionState.taskOutcomes.push(outcome)
+		this.sessionState.lastUpdated = Date.now()
+		await this._saveSessionState()
+		return outcome
+	}
+
+	getSessionState(): AgentSessionState | null {
+		return this.sessionState
+	}
+
+	/**
+	 * Builds the imperative session context block injected BEFORE every task.
+	 * Uses "DO NOT" language — informational phrasing does not work for 7B models.
+	 * This is the primary fix for duplicate file creation and package reinstallation.
+	 */
+	buildSessionContextBlock(): string {
+		const s = this.sessionState
+		if (!s) return ''
+
+		const parts: string[] = []
+
+		// Files already created — IMPERATIVE, not informational
+		if (s.allCreatedFiles.length > 0) {
+			parts.push(
+				'FILES ALREADY CREATED THIS SESSION — DO NOT use <create_file> for these.\n' +
+				'If you need to change them, use <edit_file> or <rewrite_file> instead:\n' +
+				s.allCreatedFiles.map(f => `  ${f}`).join('\n')
+			)
+		}
+
+		// Files modified (only last 8 to stay compact)
+		if (s.allModifiedFiles.length > 0) {
+			const recent = s.allModifiedFiles.slice(-8)
+			parts.push(
+				'FILES MODIFIED THIS SESSION (read before editing):\n' +
+				recent.map(f => `  ${f}`).join('\n')
+			)
+		}
+
+		// Packages installed — IMPERATIVE
+		if (s.allInstalledPackages.length > 0) {
+			const byManager: Record<string, string[]> = {}
+			for (const pkg of s.allInstalledPackages) {
+				if (!byManager[pkg.manager]) byManager[pkg.manager] = []
+				byManager[pkg.manager].push(pkg.name)
+			}
+			const lines = Object.entries(byManager)
+				.map(([mgr, names]) => `  ${mgr}: ${names.join(', ')}`)
+			parts.push(
+				'PACKAGES ALREADY INSTALLED — DO NOT reinstall these:\n' + lines.join('\n')
+			)
+		}
+
+		// Task outcomes (last 5, most recent first)
+		if (s.taskOutcomes.length > 0) {
+			const recent = s.taskOutcomes.slice(-5)
+			const lines = recent.map((o, i) =>
+				`  ${i + 1}. [${o.status.toUpperCase()}] ${o.summary}`
+			)
+			parts.push('WHAT HAS BEEN DONE (DO NOT redo):\n' + lines.join('\n'))
+		}
+
+		if (parts.length === 0) return ''
+
+		return [
+			'=== SESSION MEMORY (read carefully before acting) ===',
+			parts.join('\n\n'),
+			'=== END SESSION MEMORY ===',
+		].join('\n')
+	}
+
+	private _makeEmptyOutcome(task: AgentTask): TaskOutcome {
+		return {
+			taskId: task.id, title: task.title, status: 'done',
+			filesCreated: [], filesModified: [], packagesInstalled: [],
+			summary: task.title,
+		}
+	}
+
+	private async _saveSessionState(): Promise<void> {
+		if (!this.sessionState || !this.sessionStateURI) return
+		try {
+			const content = JSON.stringify(this.sessionState, null, 2)
+			await this._fileService.writeFile(
+				this.sessionStateURI,
+				VSBuffer.fromString(content)
+			)
+		} catch { /* non-fatal: session state is in-memory anyway */ }
 	}
 
 	async clearMemory(): Promise<void> {

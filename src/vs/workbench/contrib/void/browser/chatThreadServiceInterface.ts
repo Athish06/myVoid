@@ -171,6 +171,9 @@ export interface IChatThreadService {
 	// call to add a pipeline user message without streaming
 	addPipelineUserMessage(threadId: string, userMessage: string): Promise<string>;
 
+	// set the planning stream state
+	setPipelinePlanningRunning(threadId: string, isRunning: boolean): void;
+
 	// approve/reject
 	approveLatestToolRequest(threadId: string): void;
 	rejectLatestToolRequest(threadId: string): void;

@@ -59,12 +59,21 @@ Rules to follow when improving:
  * Handles markdown fences, validates schema, checks dependencies.
  */
 export function importPlanFromAI(rawInput: string): PlanImportResult {
-	// Step 1: Strip markdown fences if the AI wrapped in ```json
-	const cleaned = rawInput
-		.replace(/^```json\s*/i, '')
-		.replace(/^```\s*/i, '')
-		.replace(/```\s*$/, '')
-		.trim()
+	// Step 1: Extract the JSON part if there is surrounding text or markdown fences
+	let cleaned = rawInput.trim()
+	
+	// If it contains markdown code blocks, try to extract just the code
+	const jsonMatch = cleaned.match(/```(?:json)?\s*([\s\S]*?)\s*```/i)
+	if (jsonMatch && jsonMatch[1]) {
+		cleaned = jsonMatch[1].trim()
+	} else {
+		// Try to find the first { and last }
+		const startIdx = cleaned.indexOf('{')
+		const endIdx = cleaned.lastIndexOf('}')
+		if (startIdx !== -1 && endIdx !== -1 && endIdx > startIdx) {
+			cleaned = cleaned.substring(startIdx, endIdx + 1)
+		}
+	}
 
 	// Step 2: Parse JSON
 	let parsed: { tasks?: unknown[] }
@@ -114,8 +123,8 @@ export function importPlanFromAI(rawInput: string): PlanImportResult {
 			errors.push(`${prefix}: missing "description"`)
 			continue
 		}
-		if (!Array.isArray(t.targetFiles) || t.targetFiles.length === 0) {
-			errors.push(`${prefix}: "targetFiles" must be a non-empty array`)
+		if (!Array.isArray(t.targetFiles)) {
+			errors.push(`${prefix}: "targetFiles" must be an array (can be empty)`)
 			continue
 		}
 		if (t.targetFiles.length > 3) {
@@ -184,7 +193,7 @@ export function validatePlan(tasks: AgentTask[]): string[] {
 		if (!task.description) {
 			errors.push(`${prefix}: missing description`)
 		}
-		if (task.targetFiles.length === 0) {
+		if (task.targetFiles.length === 0 && task.taskType !== 'explore') {
 			errors.push(`${prefix}: no target files`)
 		}
 		if (task.targetFiles.length > 3) {

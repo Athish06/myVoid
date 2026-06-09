@@ -87,4 +87,5 @@ import '../common/voidModelService.js'
 
 // agent pipeline
 import '../common/memoryStore.js'
+import './agentAssistService.js'
 import './agentPipelineService.js'
