@@ -31,6 +31,9 @@ export interface IAgentAssistService {
 	 * applies all repairs, and returns the corrected tool call.
 	 */
 	processToolCall(toolName: string, rawParams: RawToolParamsObj): AssistResult
+
+	/** Called at the start of a new pipeline to reset tracking state */
+	resetSession(): void
 }
 
 export const IAgentAssistService = createDecorator<IAgentAssistService>('AgentAssistService')
@@ -40,34 +43,74 @@ export const IAgentAssistService = createDecorator<IAgentAssistService>('AgentAs
 
 /** Maps hallucinated tool names to their correct canonical names */
 const TOOL_NAME_ALIASES: Record<string, string> = {
+	// run_command aliases
 	'execute_command': 'run_command',
+	'bash': 'run_command',
+	'shell': 'run_command',
+	'terminal': 'run_command',
+	'run_terminal': 'run_command',
+	'execute_bash': 'run_command',
+	'run_bash': 'run_command',
+	'terminal_command': 'run_command',
+	'execute': 'run_command',
+	'command': 'run_command',
+	'exec': 'run_command',
+	// read_file aliases
+	'cat': 'read_file',
+	'view_file': 'read_file',
+	'show_file': 'read_file',
+	'open_file': 'read_file',
+	'get_file': 'read_file',
+	'view': 'read_file',
+	'read': 'read_file',
+	// write/rewrite aliases
+	'write_file': 'rewrite_file',
+	'write_to_file': 'rewrite_file',
+	'save_file': 'rewrite_file',
+	'overwrite_file': 'rewrite_file',
+	'write': 'rewrite_file',
+	'apply_changes': 'rewrite_file',
+	'set_file_content': 'rewrite_file',
+	// edit_file aliases
+	'modify_file': 'edit_file',
+	'update_file': 'edit_file',
+	'patch_file': 'edit_file',
+	'apply_diff': 'edit_file',
+	'apply_patch': 'edit_file',
+	'change_file': 'edit_file',
+	'replace_in_file': 'edit_file',
+	'edit': 'edit_file',
+	// search/ls aliases
+	'find_files': 'search_pathnames_only',
+	'find': 'search_pathnames_only',
+	'search': 'search_for_files',
+	'grep': 'search_for_files',
 	'list_dir': 'ls_dir',
 	'list_directory': 'ls_dir',
 	'dir': 'ls_dir',
-	'find_files': 'search_pathnames_only',
-	'find': 'search_pathnames_only',
-	'write_file': 'rewrite_file',
-	'modify_file': 'edit_file',
-	'update_file': 'edit_file',
+	'ls': 'ls_dir',
+	'listdir': 'ls_dir',
+	// tree aliases
+	'tree': 'get_dir_tree',
+	'dir_tree': 'get_dir_tree',
+	'directory_tree': 'get_dir_tree',
+	'file_tree': 'get_dir_tree',
+	// folder aliases
 	'make_file': 'create_file',
 	'new_file': 'create_file',
+	'touch': 'create_file',
 	'make_dir': 'create_folder',
 	'mkdir': 'create_folder',
 	'make_folder': 'create_folder',
 	'new_folder': 'create_folder',
+	'create_directory': 'create_folder',
+	// delete aliases
 	'remove_file': 'delete_file_or_folder',
 	'rm_file': 'delete_file_or_folder',
 	'delete_file': 'delete_file_or_folder',
 	'delete_folder': 'delete_file_or_folder',
 	'remove_folder': 'delete_file_or_folder',
-	'grep': 'search_for_files',
-	'search': 'search_for_files',
-	'cat': 'read_file',
-	'view_file': 'read_file',
-	'show_file': 'read_file',
-	'tree': 'get_dir_tree',
-	'dir_tree': 'get_dir_tree',
-	'directory_tree': 'get_dir_tree',
+	'rm': 'delete_file_or_folder',
 }
 
 
@@ -392,6 +435,8 @@ class AgentAssistService extends Disposable implements IAgentAssistService {
 	readonly _serviceBrand: undefined
 
 	private readonly _workspaceRoot: string | null
+	private _sessionCwd: string | null = null
+	private _filesReadThisTask: Set<string> = new Set()
 
 	constructor(
 		@IWorkspaceContextService private readonly _workspaceContextService: IWorkspaceContextService,
@@ -399,6 +444,12 @@ class AgentAssistService extends Disposable implements IAgentAssistService {
 		super()
 		const folders = this._workspaceContextService?.getWorkspace?.()?.folders || []
 		this._workspaceRoot = folders.length > 0 ? folders[0].uri.fsPath : null
+		this._sessionCwd = this._workspaceRoot
+	}
+
+	resetSession(): void {
+		this._sessionCwd = this._workspaceRoot
+		this._filesReadThisTask.clear()
 	}
 
 	/**
@@ -435,10 +486,15 @@ class AgentAssistService extends Disposable implements IAgentAssistService {
 		// If the agent uses create_file for a folder path
 		if (correctedName === 'create_file' && typeof correctedParams.uri === 'string') {
 			const uriStr = correctedParams.uri.trim()
-			// If it has no extension AND matches common folder names, intercept it
-			const hasNoExtension = !uriStr.includes('.') || uriStr.endsWith('/') || uriStr.endsWith('\\')
+			
+			const endsWithSlash = uriStr.endsWith('/') || uriStr.endsWith('\\')
+			const hasExtension = uriStr.split(/[\\/]/).pop()?.includes('.') && !uriStr.split(/[\\/]/).pop()?.startsWith('.')
+			const isKnownDotfile = /(?:^|[\\/])\.(env|gitignore|eslintrc|prettierrc|dockerignore)$/i.test(uriStr)
 			const isCommonFolder = /(?:^|[\\/])(src|app|components|utils|services|controllers|models|routes|assets|database|config|backend|frontend|api|public|tests|node_modules|dist|build)$/i.test(uriStr)
-			if (hasNoExtension && (isCommonFolder || uriStr.endsWith('/') || uriStr.endsWith('\\'))) {
+			
+			const isFolder = endsWithSlash || (!hasExtension && !isKnownDotfile && isCommonFolder)
+
+			if (isFolder) {
 				repairs.push({
 					type: 'tool_reroute',
 					description: `Intercepted create_file for folder → create_folder`,
@@ -447,6 +503,18 @@ class AgentAssistService extends Disposable implements IAgentAssistService {
 				})
 				correctedName = 'create_folder'
 				wasIntercepted = true
+			}
+		}
+
+		// ── Step 2.6: Read-Before-Edit Enforcement ──
+		let requiresReadFirst: string | undefined
+		if (correctedName === 'read_file' && typeof correctedParams.uri === 'string') {
+			this._filesReadThisTask.add(normalizePath(correctedParams.uri, this._workspaceRoot))
+		}
+		if ((correctedName === 'edit_file' || correctedName === 'rewrite_file') && typeof correctedParams.uri === 'string') {
+			const targetPath = normalizePath(correctedParams.uri, this._workspaceRoot)
+			if (!this._filesReadThisTask.has(targetPath)) {
+				requiresReadFirst = correctedParams.uri
 			}
 		}
 
@@ -466,8 +534,8 @@ class AgentAssistService extends Disposable implements IAgentAssistService {
 			this._sanitizeCwd(correctedParams, repairs)
 		}
 
-		// ── Step 6: Shell Command Translation (Windows only) ──
-		if ((correctedName === 'run_command' || correctedName === 'run_persistent_command') && os === 'windows') {
+		// ── Step 6: Terminal → XML Reroute (ALL Platforms) ──
+		if (correctedName === 'run_command' || correctedName === 'run_persistent_command') {
 			const cmdReroute = this._checkTerminalReroute(correctedParams, repairs)
 			if (cmdReroute) {
 				// Reroute to XML tool instead of running in terminal
@@ -477,7 +545,8 @@ class AgentAssistService extends Disposable implements IAgentAssistService {
 				}
 				Object.assign(correctedParams, cmdReroute.params)
 				wasIntercepted = true
-			} else {
+			} else if (os === 'windows') {
+				// ── Step 6.5: Shell Command Translation (Windows only) ──
 				this._translateShellCommand(correctedParams, repairs)
 			}
 		}
@@ -507,6 +576,7 @@ class AgentAssistService extends Disposable implements IAgentAssistService {
 			wasIntercepted,
 			blocked,
 			blockReason,
+			requiresReadFirst,
 		}
 	}
 
@@ -671,6 +741,28 @@ class AgentAssistService extends Disposable implements IAgentAssistService {
 			cmd = extractedCmd
 		}
 
+		// ── Fix 7: Compound `cd` extraction ──
+		// Handles patterns like "cd backend && npm install" or "cd frontend; npm run dev"
+		const cdMatch = cmd.match(/^\s*cd\s+([^&;]+)(?:&&|;)(.*)$/i)
+		if (cdMatch) {
+			const extractedDir = cdMatch[1].trim()
+			const remainingCmd = cdMatch[2].trim()
+			
+			// Resolve the extracted directory against current cwd or session root
+			const baseDir = params.cwd || this._sessionCwd || this._workspaceRoot
+			const newCwd = normalizePath(extractedDir, baseDir)
+			
+			params.cwd = newCwd
+			cmd = remainingCmd
+			
+			repairs.push({
+				type: 'param_extract',
+				description: `Extracted 'cd' from compound command into <cwd>`,
+				before: params.command,
+				after: `cwd: ${newCwd}, cmd: ${remainingCmd}`,
+			})
+		}
+
 		params.command = cmd.trim()
 	}
 
@@ -687,14 +779,17 @@ class AgentAssistService extends Disposable implements IAgentAssistService {
 			sanitized = sanitized.replace(/^["`']+|["`']+$/g, '').trim()
 
 			// Resolve relative cwd
-			if (sanitized && this._workspaceRoot && !(/^[A-Za-z]:[\\/]/.test(sanitized) || sanitized.startsWith('/'))) {
-				const sep = os === 'windows' ? '\\' : '/'
-				sanitized = `${this._workspaceRoot}${sep}${sanitized.replace(/^\.[\\/]/, '')}`
+			if (sanitized && !(/^[A-Za-z]:[\\/]/.test(sanitized) || sanitized.startsWith('/'))) {
+				const base = this._sessionCwd || this._workspaceRoot
+				if (base) {
+					const sep = os === 'windows' ? '\\' : '/'
+					sanitized = `${base}${sep}${sanitized.replace(/^\.[\\/]/, '')}`
+				}
 			}
 
-			// Default to workspace root if empty
-			if (!sanitized && this._workspaceRoot) {
-				sanitized = this._workspaceRoot
+			// Default to session CWD or workspace root if empty
+			if (!sanitized) {
+				sanitized = this._sessionCwd || this._workspaceRoot || ''
 			}
 
 			if (sanitized !== original) {
@@ -704,11 +799,16 @@ class AgentAssistService extends Disposable implements IAgentAssistService {
 					before: original,
 					after: sanitized,
 				})
-				params.cwd = sanitized
 			}
-		} else if (!params.cwd && this._workspaceRoot) {
+			params.cwd = sanitized
+			
+			// Update session CWD tracking if the path is absolute and valid
+			if (sanitized && (/^[A-Za-z]:[\\/]/.test(sanitized) || sanitized.startsWith('/'))) {
+				this._sessionCwd = sanitized
+			}
+		} else {
 			// Default cwd if not provided
-			params.cwd = this._workspaceRoot
+			params.cwd = this._sessionCwd || this._workspaceRoot || ''
 		}
 	}
 
@@ -804,7 +904,32 @@ class AgentAssistService extends Disposable implements IAgentAssistService {
 			return { blocked: true, reason: `The search_replace_blocks parameter is missing or empty. You must provide EXACT SEARCH/REPLACE blocks using the proper format.` }
 		}
 		
-		const blocks = params.search_replace_blocks
+		let blocks = params.search_replace_blocks
+
+		// Auto-repair common 7B hallucinated markers
+		const repairRules = [
+			{ regex: /<{4,}\s*ORIGINAL\s*/gi, replacement: ORIGINAL + '\n' },
+			{ regex: /<{4,}\s*SEARCH\s*/gi, replacement: ORIGINAL + '\n' },
+			{ regex: /={4,}\s*/gi, replacement: DIVIDER + '\n' },
+			{ regex: />{4,}\s*UPDATED\s*/gi, replacement: FINAL + '\n' },
+			{ regex: />{4,}\s*REPLACE\s*/gi, replacement: FINAL + '\n' },
+		]
+
+		let repairedBlocks = blocks
+		for (const rule of repairRules) {
+			repairedBlocks = repairedBlocks.replace(rule.regex, rule.replacement)
+		}
+
+		if (repairedBlocks !== blocks) {
+			repairs.push({
+				type: 'param_extract',
+				description: 'Auto-repaired hallucinated search/replace markers',
+				before: blocks,
+				after: repairedBlocks
+			})
+			params.search_replace_blocks = repairedBlocks
+			blocks = repairedBlocks
+		}
 
 		// Check if it contains at least one valid ORIGINAL/DIVIDER/FINAL triple
 		const hasOriginal = blocks.includes(ORIGINAL)
@@ -812,7 +937,10 @@ class AgentAssistService extends Disposable implements IAgentAssistService {
 		const hasFinal = blocks.includes(FINAL)
 
 		if (!hasOriginal || !hasDivider || !hasFinal) {
-			return { blocked: true, reason: `Invalid SEARCH/REPLACE block format. You must strictly use the ${ORIGINAL}, ${DIVIDER}, and ${FINAL} markers.` }
+			return { 
+				blocked: true, 
+				reason: `Invalid SEARCH/REPLACE block format. You must strictly use the ${ORIGINAL}, ${DIVIDER}, and ${FINAL} markers.\n\nExample format:\n${ORIGINAL}\nexact old code\n${DIVIDER}\nnew code\n${FINAL}` 
+			}
 		}
 		
 		return { blocked: false }

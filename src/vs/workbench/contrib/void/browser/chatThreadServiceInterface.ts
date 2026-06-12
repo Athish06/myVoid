@@ -148,6 +148,9 @@ export interface IChatThreadService {
 	dangerousSetState: (newState: ThreadsState) => void;
 	resetState: () => void;
 
+	/** Overwrites the messages array of a given thread in-place without triggering a new stream */
+	overwriteThreadMessages(threadId: string, messages: ChatMessage[]): void;
+
 	// // current thread's staging selections
 	// closeCurrentStagingSelectionsInMessage(opts: { messageIdx: number }): void;
 	// closeCurrentStagingSelectionsInThread(): void;

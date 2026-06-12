@@ -17,122 +17,65 @@ import { ChatMode } from '../../common/voidSettingsTypes.js'
 export const extractReasoningWrapper = (
 	onText: OnText, onFinalMessage: OnFinalMessage, thinkTags: [string, string]
 ): { newOnText: OnText, newOnFinalMessage: OnFinalMessage } => {
-	let latestAddIdx = 0 // exclusive index in fullText_
-	let foundTag1 = false
-	let foundTag2 = false
-
-	let fullTextSoFar = ''
-	let fullReasoningSoFar = ''
-
 
 	if (!thinkTags[0] || !thinkTags[1]) throw new Error(`thinkTags must not be empty if provided. Got ${JSON.stringify(thinkTags)}.`)
 
-	let onText_ = onText
-	onText = (params) => {
-		onText_(params)
-	}
+	const newOnText: OnText = ({ fullText: fullText_, fullReasoning: incomingReasoning = '', ...p }) => {
+		let fullTextSoFar = ''
+		let extractedReasoning = ''
 
-	const newOnText: OnText = ({ fullText: fullText_, ...p }) => {
-
-		// until found the first think tag, keep adding to fullText
-		if (!foundTag1) {
+		const tag1Idx = fullText_.indexOf(thinkTags[0])
+		if (tag1Idx === -1) {
 			const endsWithTag1 = endsWithAnyPrefixOf(fullText_, thinkTags[0])
 			if (endsWithTag1) {
-				// console.log('endswith1', { fullTextSoFar, fullReasoningSoFar, fullText_ })
-				// wait until we get the full tag or know more
-				return
+				fullTextSoFar = fullText_.substring(0, fullText_.length - endsWithTag1.length)
+			} else {
+				fullTextSoFar = fullText_
 			}
-			// if found the first tag
-			const tag1Index = fullText_.indexOf(thinkTags[0])
-			if (tag1Index !== -1) {
-				// console.log('tag1Index !==1', { tag1Index, fullTextSoFar, fullReasoningSoFar, thinkTags, fullText_ })
-				foundTag1 = true
-				// Add text before the tag to fullTextSoFar
-				fullTextSoFar += fullText_.substring(0, tag1Index)
-				// Update latestAddIdx to after the first tag
-				latestAddIdx = tag1Index + thinkTags[0].length
-				onText({ ...p, fullText: fullTextSoFar, fullReasoning: fullReasoningSoFar })
-				return
+		} else {
+			fullTextSoFar = fullText_.substring(0, tag1Idx)
+			const contentAfterTag1 = fullText_.substring(tag1Idx + thinkTags[0].length)
+			
+			const tag2Idx = contentAfterTag1.indexOf(thinkTags[1])
+			if (tag2Idx === -1) {
+				const endsWithTag2 = endsWithAnyPrefixOf(contentAfterTag1, thinkTags[1])
+				if (endsWithTag2) {
+					extractedReasoning = contentAfterTag1.substring(0, contentAfterTag1.length - endsWithTag2.length)
+				} else {
+					extractedReasoning = contentAfterTag1
+				}
+			} else {
+				extractedReasoning = contentAfterTag1.substring(0, tag2Idx)
+				fullTextSoFar += contentAfterTag1.substring(tag2Idx + thinkTags[1].length)
 			}
-
-			// console.log('adding to text A', { fullTextSoFar, fullReasoningSoFar })
-			// add the text to fullText
-			fullTextSoFar = fullText_
-			latestAddIdx = fullText_.length
-			onText({ ...p, fullText: fullTextSoFar, fullReasoning: fullReasoningSoFar })
-			return
 		}
 
-		// at this point, we found <tag1>
-
-		// until found the second think tag, keep adding to fullReasoning
-		if (!foundTag2) {
-			const endsWithTag2 = endsWithAnyPrefixOf(fullText_, thinkTags[1])
-			if (endsWithTag2 && endsWithTag2 !== thinkTags[1]) { // if ends with any partial part (full is fine)
-				// console.log('endsWith2', { fullTextSoFar, fullReasoningSoFar })
-				// wait until we get the full tag or know more
-				return
-			}
-
-			// if found the second tag
-			const tag2Index = fullText_.indexOf(thinkTags[1], latestAddIdx)
-			if (tag2Index !== -1) {
-				// console.log('tag2Index !== -1', { fullTextSoFar, fullReasoningSoFar })
-				foundTag2 = true
-				// Add everything between first and second tag to reasoning
-				fullReasoningSoFar += fullText_.substring(latestAddIdx, tag2Index)
-				// Update latestAddIdx to after the second tag
-				latestAddIdx = tag2Index + thinkTags[1].length
-				onText({ ...p, fullText: fullTextSoFar, fullReasoning: fullReasoningSoFar })
-				return
-			}
-
-			// add the text to fullReasoning (content after first tag but before second tag)
-			// console.log('adding to text B', { fullTextSoFar, fullReasoningSoFar })
-
-			// If we have more text than we've processed, add it to reasoning
-			if (fullText_.length > latestAddIdx) {
-				fullReasoningSoFar += fullText_.substring(latestAddIdx)
-				latestAddIdx = fullText_.length
-			}
-
-			onText({ ...p, fullText: fullTextSoFar, fullReasoning: fullReasoningSoFar })
-			return
-		}
-
-		// at this point, we found <tag2> - content after the second tag is normal text
-		// console.log('adding to text C', { fullTextSoFar, fullReasoningSoFar })
-
-		// Add any new text after the closing tag to fullTextSoFar
-		if (fullText_.length > latestAddIdx) {
-			fullTextSoFar += fullText_.substring(latestAddIdx)
-			latestAddIdx = fullText_.length
-		}
-
-		onText({ ...p, fullText: fullTextSoFar, fullReasoning: fullReasoningSoFar })
-	}
-
-
-	const getOnFinalMessageParams = () => {
-		const fullText_ = fullTextSoFar
-		const tag1Idx = fullText_.indexOf(thinkTags[0])
-		const tag2Idx = fullText_.indexOf(thinkTags[1])
-		if (tag1Idx === -1) return { fullText: fullText_, fullReasoning: '' } // never started reasoning
-		if (tag2Idx === -1) return { fullText: '', fullReasoning: fullText_ } // never stopped reasoning
-
-		const fullReasoning = fullText_.substring(tag1Idx + thinkTags[0].length, tag2Idx)
-		const fullText = fullText_.substring(0, tag1Idx) + fullText_.substring(tag2Idx + thinkTags[1].length, Infinity)
-
-		return { fullText, fullReasoning }
+		onText({ ...p, fullText: fullTextSoFar, fullReasoning: incomingReasoning + extractedReasoning })
 	}
 
 	const newOnFinalMessage: OnFinalMessage = (params) => {
+		let fullTextSoFar = ''
+		let extractedReasoning = ''
+		const fullText_ = params.fullText
+		const incomingReasoning = params.fullReasoning || ''
 
-		// treat like just got text before calling onFinalMessage (or else we sometimes miss the final chunk that's new to finalMessage)
-		newOnText({ ...params })
+		const tag1Idx = fullText_.indexOf(thinkTags[0])
+		if (tag1Idx === -1) {
+			fullTextSoFar = fullText_
+		} else {
+			fullTextSoFar = fullText_.substring(0, tag1Idx)
+			const contentAfterTag1 = fullText_.substring(tag1Idx + thinkTags[0].length)
+			
+			const tag2Idx = contentAfterTag1.indexOf(thinkTags[1])
+			if (tag2Idx === -1) {
+				extractedReasoning = contentAfterTag1
+			} else {
+				extractedReasoning = contentAfterTag1.substring(0, tag2Idx)
+				fullTextSoFar += contentAfterTag1.substring(tag2Idx + thinkTags[1].length)
+			}
+		}
 
-		const { fullText, fullReasoning } = getOnFinalMessageParams()
-		onFinalMessage({ ...params, fullText, fullReasoning })
+		onFinalMessage({ ...params, fullText: fullTextSoFar, fullReasoning: incomingReasoning + extractedReasoning })
 	}
 
 	return { newOnText, newOnFinalMessage }
@@ -447,10 +390,87 @@ export const extractXMLToolsWrapper = (
 	const toolOpenPrefixes = tools.map(t => `<${t.name}`)
 	for (const t of tools) { toolOfToolName[t.name] = t }
 
-	// Hack for small models: Alias execute_command to run_command
+	// Alias hallucinated tool names to real tools — prevents 7B tool calls from silently vanishing
 	if (toolOfToolName['run_command']) {
-		toolOpenPrefixes.push('<execute_command')
-		toolOfToolName['execute_command' as any] = toolOfToolName['run_command']
+		const runAliases = [
+			'execute_command', 'bash', 'shell', 'terminal', 'run_terminal',
+			'execute_bash', 'run_bash', 'terminal_command', 'run_shell',
+			'execute', 'command', 'exec'
+		]
+		for (const alias of runAliases) {
+			toolOpenPrefixes.push(`<${alias}`)
+			toolOfToolName[alias as any] = toolOfToolName['run_command']
+		}
+	}
+
+	if (toolOfToolName['read_file']) {
+		const readAliases = ['cat', 'view_file', 'show_file', 'read', 'open_file', 'get_file', 'view']
+		for (const alias of readAliases) {
+			toolOpenPrefixes.push(`<${alias}`)
+			toolOfToolName[alias as any] = toolOfToolName['read_file']
+		}
+	}
+
+	if (toolOfToolName['rewrite_file']) {
+		const writeAliases = [
+			'write_file', 'write_to_file', 'save_file', 'overwrite_file',
+			'write', 'apply_changes', 'set_file_content'
+		]
+		for (const alias of writeAliases) {
+			toolOpenPrefixes.push(`<${alias}`)
+			toolOfToolName[alias as any] = toolOfToolName['rewrite_file']
+		}
+	}
+
+	if (toolOfToolName['edit_file']) {
+		const editAliases = [
+			'patch_file', 'apply_diff', 'apply_patch', 'modify_file',
+			'update_file', 'change_file', 'replace_in_file', 'edit'
+		]
+		for (const alias of editAliases) {
+			toolOpenPrefixes.push(`<${alias}`)
+			toolOfToolName[alias as any] = toolOfToolName['edit_file']
+		}
+	}
+
+	if (toolOfToolName['ls_dir']) {
+		const lsAliases = ['list_dir', 'list_directory', 'ls', 'dir', 'listdir']
+		for (const alias of lsAliases) {
+			toolOpenPrefixes.push(`<${alias}`)
+			toolOfToolName[alias as any] = toolOfToolName['ls_dir']
+		}
+	}
+
+	if (toolOfToolName['get_dir_tree']) {
+		const treeAliases = ['tree', 'dir_tree', 'directory_tree', 'file_tree', 'show_tree']
+		for (const alias of treeAliases) {
+			toolOpenPrefixes.push(`<${alias}`)
+			toolOfToolName[alias as any] = toolOfToolName['get_dir_tree']
+		}
+	}
+
+	if (toolOfToolName['create_file']) {
+		const createAliases = ['make_file', 'new_file', 'touch']
+		for (const alias of createAliases) {
+			toolOpenPrefixes.push(`<${alias}`)
+			toolOfToolName[alias as any] = toolOfToolName['create_file']
+		}
+	}
+
+	if (toolOfToolName['create_folder']) {
+		const mkdirAliases = ['make_dir', 'mkdir', 'make_folder', 'new_folder', 'create_directory']
+		for (const alias of mkdirAliases) {
+			toolOpenPrefixes.push(`<${alias}`)
+			toolOfToolName[alias as any] = toolOfToolName['create_folder']
+		}
+	}
+
+	if (toolOfToolName['delete_file_or_folder']) {
+		const delAliases = ['remove_file', 'rm_file', 'delete_file', 'delete_folder', 'remove_folder', 'rm']
+		for (const alias of delAliases) {
+			toolOpenPrefixes.push(`<${alias}`)
+			toolOfToolName[alias as any] = toolOfToolName['delete_file_or_folder']
+		}
 	}
 
 	const toolId = generateUuid()

@@ -312,9 +312,16 @@ const _sendOpenAICompatibleChat = async ({ messages, onText, onFinalMessage, onE
 
 	// open source models - manually parse think tokens
 	const { needsManualParse: needsManualReasoningParse, nameOfFieldInDelta: nameOfReasoningFieldInDelta } = providerReasoningIOSettings?.output ?? {}
-	const manuallyParseReasoning = needsManualReasoningParse && canIOReasoning && openSourceThinkTags
-	if (manuallyParseReasoning) {
-		const { newOnText, newOnFinalMessage } = extractReasoningWrapper(onText, onFinalMessage, openSourceThinkTags)
+	let manuallyParseReasoning: boolean = !!(needsManualReasoningParse && canIOReasoning && openSourceThinkTags)
+	let thinkTagsToUse = openSourceThinkTags
+
+	if (chatMode === 'agent' && !manuallyParseReasoning && !nameOfReasoningFieldInDelta) {
+		manuallyParseReasoning = true
+		thinkTagsToUse = ['<think>', '</think>']
+	}
+
+	if (manuallyParseReasoning && thinkTagsToUse) {
+		const { newOnText, newOnFinalMessage } = extractReasoningWrapper(onText, onFinalMessage, thinkTagsToUse as [string, string])
 		onText = newOnText
 		onFinalMessage = newOnFinalMessage
 	}
@@ -497,6 +504,12 @@ const sendAnthropicChat = async ({ messages, providerName, onText, onFinalMessag
 	// manually parse out tool results if XML
 	if (!specialToolFormat) {
 		const { newOnText, newOnFinalMessage } = extractXMLToolsWrapper(onText, onFinalMessage, chatMode, mcpTools)
+		onText = newOnText
+		onFinalMessage = newOnFinalMessage
+	}
+
+	if (chatMode === 'agent') {
+		const { newOnText, newOnFinalMessage } = extractReasoningWrapper(onText, onFinalMessage, ['<think>', '</think>'])
 		onText = newOnText
 		onFinalMessage = newOnFinalMessage
 	}
@@ -765,6 +778,12 @@ const sendGeminiChat = async ({
 	// manually parse out tool results if XML
 	if (!specialToolFormat) {
 		const { newOnText, newOnFinalMessage } = extractXMLToolsWrapper(onText, onFinalMessage, chatMode, mcpTools)
+		onText = newOnText
+		onFinalMessage = newOnFinalMessage
+	}
+
+	if (chatMode === 'agent') {
+		const { newOnText, newOnFinalMessage } = extractReasoningWrapper(onText, onFinalMessage, ['<think>', '</think>'])
 		onText = newOnText
 		onFinalMessage = newOnFinalMessage
 	}

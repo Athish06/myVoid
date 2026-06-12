@@ -27,6 +27,8 @@ export interface AssistResult {
 	/** Whether the call should be blocked entirely */
 	blocked: boolean
 	blockReason?: string
+	/** If set, signals that the file at this path must be read before editing (read-before-edit enforcement) */
+	requiresReadFirst?: string
 }
 
 /** Shell translation result */

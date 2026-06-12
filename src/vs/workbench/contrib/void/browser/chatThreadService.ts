@@ -231,6 +231,14 @@ class ChatThreadService extends Disposable implements IChatThreadService {
 		this._onDidChangeCurrentThread.fire()
 	}
 
+	overwriteThreadMessages(threadId: string, messages: ChatMessage[]): void {
+		const thread = this.state.allThreads[threadId]
+		if (!thread) return
+		thread.messages = messages
+		// No event fire here intentionally — this is used to trim context window
+		// right before a generation starts without causing UI flashes or stream interrupts
+	}
+
 	// !!! this is important for properly restoring URIs from storage
 	// should probably re-use code from void/src/vs/base/common/marshalling.ts instead. but this is simple enough
 	private _convertThreadDataFromStorage(threadsStr: string): ChatThreads {

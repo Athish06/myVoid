@@ -424,21 +424,42 @@ export class ToolsService implements IToolsService {
 			// ---
 
 			create_file: async ({ uri }) => {
+				// Auto-create ALL parent directories (handles src/auth/models/user.ts in one shot)
+				const ensureParentDirs = async (fileUri: URI) => {
+					const parentUri = URI.joinPath(fileUri, '..')
+					try {
+						const parentExists = await fileService.exists(parentUri)
+						if (!parentExists) {
+							await ensureParentDirs(parentUri)
+							try { await fileService.createFolder(parentUri) } catch { /* may race-create */ }
+						}
+					} catch {
+						await ensureParentDirs(parentUri)
+						try { await fileService.createFolder(parentUri) } catch { /* may race-create */ }
+					}
+				}
+
+				try {
+					await ensureParentDirs(uri)
+				} catch (e) {
+					return { result: { message: `Could not create parent directory for ${uri.fsPath}: ${e}` } }
+				}
+
 				const exists = await fileService.exists(uri)
 				if (exists) {
-					return { result: { message: `The file ${uri.fsPath} already exists. You do not need to create it again. Please proceed to use read_file or rewrite_file to interact with it.` } }
+					return { result: { message: `STOP: File ${uri.fsPath} already exists. DO NOT call create_file again. Use read_file to inspect it, then rewrite_file or edit_file to modify it.` } }
 				}
 				await fileService.createFile(uri)
-				return { result: {} }
+				return { result: { message: `File ${uri.fsPath} created successfully. Now call rewrite_file with the complete file content.` } }
 			},
 
 			create_folder: async ({ uri }) => {
 				const exists = await fileService.exists(uri)
 				if (exists) {
-					return { result: { message: `The folder ${uri.fsPath} already exists.` } }
+					return { result: { message: `Folder ${uri.fsPath} already exists. Proceed to use it.` } }
 				}
 				await fileService.createFolder(uri)
-				return { result: {} }
+				return { result: { message: `Folder ${uri.fsPath} created.` } }
 			},
 
 			delete_file_or_folder: async ({ uri, isRecursive }) => {
@@ -449,17 +470,52 @@ export class ToolsService implements IToolsService {
 			rewrite_file: async ({ uri, newContent }) => {
 				const exists = await fileService.exists(uri)
 				if (!exists) {
-					throw new Error(`File does not exist: ${uri.fsPath}. You must use the create_file tool before rewriting it.`)
+					// Auto-create: model skipped create_file, recover gracefully
+					const ensureParentDirs = async (fileUri: URI) => {
+						const parentUri = URI.joinPath(fileUri, '..')
+						try {
+							const parentExists = await fileService.exists(parentUri)
+							if (!parentExists) {
+								await ensureParentDirs(parentUri)
+								try { await fileService.createFolder(parentUri) } catch { }
+							}
+						} catch {
+							await ensureParentDirs(parentUri)
+							try { await fileService.createFolder(parentUri) } catch { }
+						}
+					}
+					try {
+						await ensureParentDirs(uri)
+						await fileService.createFile(uri)
+					} catch (e) {
+						throw new Error(`Could not auto-create ${uri.fsPath}: ${e}`)
+					}
 				}
 				await voidModelService.initializeModel(uri)
 				if (this.commandBarService.getStreamState(uri) === 'streaming') {
-					throw new Error(`Another LLM is currently making changes to this file. Please stop streaming for now and ask the user to resume later.`)
+					throw new Error(`Another LLM is currently making changes to this file.`)
 				}
 				await editCodeService.callBeforeApplyOrEdit(uri)
 				editCodeService.instantlyRewriteFile({ uri, newContent })
-				// at end, get lint errors
 				const lintErrorsPromise = Promise.resolve().then(async () => {
 					await timeout(2000)
+					
+					// Verify write succeeded (SWE-Agent style)
+					try {
+						const { model } = voidModelService.getModel(uri)
+						if (model) {
+							const writtenContent = model.getValue(0) // 0 = LF
+							const trimmedWritten = writtenContent.trim()
+							const trimmedExpected = newContent.trim()
+							if (trimmedWritten.length < trimmedExpected.length * 0.5) {
+								return { lintErrors: [{ code: 'WRITE_FAILED', message: '(error) File content is significantly shorter than expected. The rewrite may have failed or was cut off. Do NOT use placeholders. Rewrite the ENTIRE file.', startLineNumber: 1, endLineNumber: 1 }] as any }
+							}
+							if (trimmedWritten.includes('// ... existing code ...') || trimmedWritten.includes('// ... existing ...')) {
+								return { lintErrors: [{ code: 'WRITE_FAILED', message: '(error) File contains placeholder comments like "// ... existing ...". You must write the ENTIRE file content. Rewrite it completely.', startLineNumber: 1, endLineNumber: 1 }] as any }
+							}
+						}
+					} catch { /* ignore */ }
+
 					const { lintErrors } = this._getLintErrors(uri)
 					return { lintErrors }
 				})
@@ -523,10 +579,24 @@ export class ToolsService implements IToolsService {
 				.substring(0, MAX_FILE_CHARS_PAGE)
 		}
 
+		// Smart output compressor for terminal and file outputs — prevents 7B context overflow
+		const compressToolOutput = (output: string, maxChars = 4000): string => {
+			if (output.length <= maxChars) return output
+			const headChars = Math.floor(maxChars * 0.15)
+			const tailChars = Math.floor(maxChars * 0.85)
+			const omitted = output.length - headChars - tailChars
+			return (
+				output.slice(0, headChars) +
+				`\n\n... [${omitted} characters omitted — showing tail] ...\n\n` +
+				output.slice(-tailChars)
+			)
+		}
+
 		// given to the LLM after the call for successful tool calls
 		this.stringOfResult = {
 			read_file: (params, result) => {
-				return `${params.uri.fsPath}\n\`\`\`\n${result.fileContents}\n\`\`\`${nextPageStr(result.hasNextPage)}${result.hasNextPage ? `\nMore info because truncated: this file has ${result.totalNumLines} lines, or ${result.totalFileLen} characters.` : ''}`
+				const compressed = compressToolOutput(result.fileContents, 6000)
+				return `${params.uri.fsPath}\n\`\`\`\n${compressed}\n\`\`\`${nextPageStr(result.hasNextPage)}${result.hasNextPage ? `\nFile has ${result.totalNumLines} lines total.` : ''}`
 			},
 			ls_dir: (params, result) => {
 				const dirTreeStr = stringifyDirectoryTree1Deep(params, result)
@@ -572,37 +642,38 @@ export class ToolsService implements IToolsService {
 				return `URI ${params.uri.fsPath} successfully deleted.`
 			},
 			edit_file: (params, result) => {
-				const lintErrsString = (
-					this.voidSettingsService.state.globalSettings.includeToolLintErrors ?
-						(result.lintErrors ? ` Lint errors found after change:\n${stringifyLintErrors(result.lintErrors)}.\nIf this is related to a change made while calling this tool, you might want to fix the error.`
-							: ` No lint errors found.`)
-						: '')
-
-				return `Change successfully made to ${params.uri.fsPath}.${lintErrsString}`
+				if (!this.voidSettingsService.state.globalSettings.includeToolLintErrors) {
+					return `Change successfully made to ${params.uri.fsPath}.`
+				}
+				if (!result.lintErrors || result.lintErrors.length === 0) {
+					return `Change successfully made to ${params.uri.fsPath}. No lint errors.`
+				}
+				const errStr = stringifyLintErrors(result.lintErrors)
+				return `Change made to ${params.uri.fsPath}.\n\n⚠ LINT ERRORS DETECTED — Fix these BEFORE proceeding to the next task:\n${errStr}\n\nOutput an <edit_file> or <rewrite_file> call to fix the above errors now.`
 			},
 			rewrite_file: (params, result) => {
-				const lintErrsString = (
-					this.voidSettingsService.state.globalSettings.includeToolLintErrors ?
-						(result.lintErrors ? ` Lint errors found after change:\n${stringifyLintErrors(result.lintErrors)}.\nIf this is related to a change made while calling this tool, you might want to fix the error.`
-							: ` No lint errors found.`)
-						: '')
-
-				return `Change successfully made to ${params.uri.fsPath}.${lintErrsString}`
+				if (!this.voidSettingsService.state.globalSettings.includeToolLintErrors) {
+					return `Change successfully made to ${params.uri.fsPath}.`
+				}
+				if (!result.lintErrors || result.lintErrors.length === 0) {
+					return `Change successfully made to ${params.uri.fsPath}. No lint errors.`
+				}
+				const errStr = stringifyLintErrors(result.lintErrors)
+				return `Change made to ${params.uri.fsPath}.\n\n⚠ LINT ERRORS DETECTED — Fix these BEFORE proceeding:\n${errStr}\n\nOutput an <edit_file> call to fix the above errors now.`
 			},
 			run_command: (params, result) => {
 				const { resolveReason, result: result_, } = result
-				// success
+				const compressed = compressToolOutput(result_, 4000)
 				if (resolveReason.type === 'done') {
 					if (resolveReason.exitCode !== 0) {
-						return `${result_}\n(exit code ${resolveReason.exitCode})\n\n[CRITICAL FAILURE: DO NOT APOLOGIZE. DO NOT EXPLAIN. YOU ARE AN AUTONOMOUS CODING AGENT. IMMEDIATELY OUTPUT A <run_command> OR OTHER XML TOOL TO FIX THIS ERROR. DO NOT OUTPUT PLAIN TEXT.]`
+						return `${compressed}\n(exit code ${resolveReason.exitCode})\n\n[AGENT: COMMAND FAILED. Analyze the error above. Output a new <run_command> to fix it. DO NOT output plain text.]`
 					}
-					return `${result_}\n(exit code ${resolveReason.exitCode})`
+					return `${compressed}\n(exit code ${resolveReason.exitCode})`
 				}
-				// normal command
 				if (resolveReason.type === 'timeout') {
-					return `${result_}\nTerminal command ran, but was automatically killed by Void after ${MAX_TERMINAL_INACTIVE_TIME}s of inactivity and did not finish successfully. To try with more time, open a persistent terminal and run the command there.\n\n[CRITICAL FAILURE: DO NOT APOLOGIZE. DO NOT EXPLAIN. YOU ARE AN AUTONOMOUS CODING AGENT. IMMEDIATELY OUTPUT A <run_command> OR OTHER XML TOOL TO FIX THIS ERROR. DO NOT OUTPUT PLAIN TEXT.]`
+					return `${compressed}\nCommand timed out after ${MAX_TERMINAL_INACTIVE_TIME}s.\n\n[AGENT: If the command is still needed, open a persistent terminal.]`
 				}
-				throw new Error(`Unexpected internal error: Terminal command did not resolve with a valid reason.`)
+				throw new Error(`Unexpected resolve reason`)
 			},
 
 			run_persistent_command: (params, result) => {

@@ -1392,9 +1392,37 @@ const AssistantMessageComponent = ({ chatMessage, isCheckpointGhost, isCommitted
 	const accessor = useAccessor()
 	const chatThreadsService = accessor.get('IChatThreadService')
 
-	const reasoningStr = chatMessage.reasoning?.trim() || null
+	let contentStr = chatMessage.displayContent || ''
+	let questionStr: string | null = null
+	let isQuestionDone = false
+	let hallucinatedThinkStr: string | null = null
+
+	// Extract agent_question
+	const xmlMatch = contentStr.match(/<agent_question>\s*([\s\S]*?)(?:(<\/agent_question>)|$)/i)
+	if (xmlMatch) {
+		questionStr = xmlMatch[1].trim()
+		contentStr = contentStr.replace(xmlMatch[0], '')
+		isQuestionDone = !!xmlMatch[2] || isCommitted
+	} else {
+		const textMatch = contentStr.match(/AGENT_QUESTION:\s*([\s\S]*?)$/i)
+		if (textMatch) {
+			questionStr = textMatch[1].trim()
+			contentStr = contentStr.replace(textMatch[0], '')
+			isQuestionDone = isCommitted
+		}
+	}
+
+	// Extract hallucinated THINK: 
+	const thinkMatch = contentStr.match(/THINK:\s*([\s\S]*?)(?=(?:<[a-z_]+>)|$)/i)
+	if (thinkMatch) {
+		hallucinatedThinkStr = thinkMatch[1].trim()
+		contentStr = contentStr.replace(thinkMatch[0], '')
+	}
+
+	const reasoningStr = (chatMessage.reasoning?.trim() || '') + (hallucinatedThinkStr ? (chatMessage.reasoning ? '\n\n' : '') + hallucinatedThinkStr : '')
 	const hasReasoning = !!reasoningStr
-	const isDoneReasoning = !!chatMessage.displayContent
+	const isDoneReasoning = !!contentStr || isCommitted // if it started outputting normal content, reasoning is done
+
 	const thread = chatThreadsService.getCurrentThread()
 
 
@@ -1403,7 +1431,7 @@ const AssistantMessageComponent = ({ chatMessage, isCheckpointGhost, isCommitted
 		messageIdx: messageIdx,
 	}
 
-	const isEmpty = !chatMessage.displayContent && !chatMessage.reasoning
+	const isEmpty = !contentStr && !reasoningStr && !questionStr
 	if (isEmpty) return null
 
 	return <>
@@ -1423,12 +1451,28 @@ const AssistantMessageComponent = ({ chatMessage, isCheckpointGhost, isCommitted
 			</div>
 		}
 
+		{/* agent question */}
+		{questionStr &&
+			<div className={`${isCheckpointGhost ? 'opacity-50' : ''}`}>
+				<ReasoningWrapper isDoneReasoning={isQuestionDone} isStreaming={!isCommitted} activeTitle="Asking Question" inactiveTitle="Agent Question">
+					<SmallProseWrapper>
+						<ChatMarkdownRender
+							string={questionStr}
+							chatMessageLocation={chatMessageLocation}
+							isApplyEnabled={false}
+							isLinkDetectionEnabled={true}
+						/>
+					</SmallProseWrapper>
+				</ReasoningWrapper>
+			</div>
+		}
+
 		{/* assistant message */}
-		{chatMessage.displayContent &&
+		{contentStr &&
 			<div className={`${isCheckpointGhost ? 'opacity-50' : ''}`}>
 				<ProseWrapper>
 					<ChatMarkdownRender
-						string={chatMessage.displayContent || ''}
+						string={contentStr}
 						chatMessageLocation={chatMessageLocation}
 						isApplyEnabled={true}
 						isLinkDetectionEnabled={true}
@@ -1440,20 +1484,39 @@ const AssistantMessageComponent = ({ chatMessage, isCheckpointGhost, isCommitted
 
 }
 
-const ReasoningWrapper = ({ isDoneReasoning, isStreaming, children }: { isDoneReasoning: boolean, isStreaming: boolean, children: React.ReactNode }) => {
+const ReasoningWrapper = ({ isDoneReasoning, isStreaming, children, activeTitle = 'Thinking', inactiveTitle = 'Thought Process' }: { isDoneReasoning: boolean, isStreaming: boolean, children: React.ReactNode, activeTitle?: string, inactiveTitle?: string }) => {
 	const isDone = isDoneReasoning || !isStreaming
 	const isWriting = !isDone
 	const [isOpen, setIsOpen] = useState(isWriting)
+
 	useEffect(() => {
 		if (!isWriting) setIsOpen(false) // if just finished reasoning, close
 	}, [isWriting])
-	return <ToolHeaderWrapper title='Reasoning' desc1={isWriting ? <IconLoading /> : ''} isOpen={isOpen} onClick={() => setIsOpen(v => !v)}>
-		<ToolChildrenWrapper>
-			<div className='!select-text cursor-auto'>
-				{children}
+
+	return (
+		<div className="mt-1.5 mb-2 w-full">
+			<div 
+				className="flex items-center w-fit gap-1.5 cursor-pointer text-void-fg-3 hover:text-void-fg-2 transition-colors duration-150 text-[12.5px] font-medium select-none"
+				onClick={() => setIsOpen(v => !v)}
+			>
+				<span>{isWriting ? activeTitle : inactiveTitle}</span>
+				{isWriting && <IconLoading className="w-3.5 h-3.5 opacity-70" />}
+				<ChevronRight className={`w-3.5 h-3.5 opacity-70 transition-transform duration-150 ${isOpen ? 'rotate-90' : ''}`} />
 			</div>
-		</ToolChildrenWrapper>
-	</ToolHeaderWrapper>
+			
+			<div 
+				className={`grid transition-all duration-200 ease-in-out ${isOpen ? 'grid-rows-[1fr] opacity-100 mt-2' : 'grid-rows-[0fr] opacity-0 mt-0'}`}
+			>
+				<div className="overflow-hidden">
+					<div className="pl-3 ml-[3px] border-l-2 border-void-border-2 text-void-fg-3 text-[13px] leading-relaxed">
+						<div className='!select-text cursor-auto opacity-80 mix-blend-plus-lighter pb-1'>
+							{children}
+						</div>
+					</div>
+				</div>
+			</div>
+		</div>
+	)
 }
 
 

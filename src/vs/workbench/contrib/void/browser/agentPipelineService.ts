@@ -5,12 +5,14 @@
 
 import { Disposable } from '../../../../base/common/lifecycle.js'
 import { Emitter, Event } from '../../../../base/common/event.js'
+import { URI } from '../../../../base/common/uri.js'
 import { registerSingleton, InstantiationType } from '../../../../platform/instantiation/common/extensions.js'
 import { createDecorator } from '../../../../platform/instantiation/common/instantiation.js'
 import { ILLMMessageService } from '../common/sendLLMMessageService.js'
 import { IVoidSettingsService } from '../common/voidSettingsService.js'
 import { IConvertToLLMMessageService } from './convertToLLMMessageService.js'
 import { IDirectoryStrService } from '../common/directoryStrService.js'
+import { IFileService } from '../../../../platform/files/common/files.js'
 import { IWorkspaceContextService } from '../../../../platform/workspace/common/workspace.js'
 import { IMemoryStore } from '../common/memoryStore.js'
 import {
@@ -29,7 +31,7 @@ import { ModelSelection, ProviderName } from '../common/voidSettingsTypes.js'
 import { IDialogService } from '../../../../platform/dialogs/common/dialogs.js'
 
 import { IChatThreadService } from './chatThreadServiceInterface.js'
-
+import { IToolsService } from './toolsService.js'
 
 // ======================== Service Interface ========================
 
@@ -81,10 +83,11 @@ class AgentPipelineService extends Disposable implements IAgentPipelineService {
 		@IConvertToLLMMessageService private readonly _convertToLLMMessagesService: IConvertToLLMMessageService,
 		@IDirectoryStrService private readonly _directoryStrService: IDirectoryStrService,
 		@IWorkspaceContextService private readonly _workspaceContextService: IWorkspaceContextService,
-		
 		@IMemoryStore private readonly _memoryStore: IMemoryStore,
+		@IFileService private readonly _fileService: IFileService,
 		@IChatThreadService private readonly _chatThreadService: IChatThreadService,
 		@IDialogService private readonly _dialogService: IDialogService,
+		@IToolsService private readonly _toolsService: IToolsService,
 	) {
 		super()
 	}
@@ -470,16 +473,20 @@ class AgentPipelineService extends Disposable implements IAgentPipelineService {
 			this._setState({ currentTaskIndex: taskIndex, executionLog: '' })
 			this._updatePlanTasks(plan)
 
+			// Get the workspace root
+			const workspaceFolders = this._workspaceContextService?.getWorkspace?.()?.folders || []
+			const workspaceRoot = workspaceFolders.length > 0 ? workspaceFolders[0].uri.fsPath : ''
+			const workspaceRootMsg = workspaceRoot 
+				? `Your root workspace directory is: ${workspaceRoot}\nUse this as the cwd for all terminal commands unless instructed otherwise.` 
+				: 'No workspace folder is open.'
+
+			// Build Repo Map (Feature 4)
+			const repoMap = workspaceRoot ? await this._buildRepoMap(workspaceRoot) : ''
+
 			// Build context with memory + session state
 			const memoryContext = this._memoryStore.buildContextString(task, 350)
 			const sessionContextBlock = this._memoryStore.buildSessionContextBlock()
-			const executionPrompt = buildTaskExecutionPrompt(task, plan, memoryContext, sessionContextBlock)
-
-			// Get the workspace root
-			const workspaceFolders = this._workspaceContextService?.getWorkspace?.()?.folders || []
-			const workspaceRootMsg = workspaceFolders.length > 0 
-				? `Your root workspace directory is: ${workspaceFolders[0].uri.fsPath}\nUse this as the cwd for all terminal commands unless instructed otherwise.` 
-				: 'No workspace folder is open.'
+			const executionPrompt = buildTaskExecutionPrompt(task, plan, memoryContext, sessionContextBlock + (repoMap ? `\n\n${repoMap}` : ''))
 
 			// Detect model size for prompt selection
 			const modelName = (modelSelection?.modelName || '').toLowerCase()
@@ -493,14 +500,20 @@ class AgentPipelineService extends Disposable implements IAgentPipelineService {
 				? AUTONOMOUS_EXECUTION_SYSTEM_PROMPT_7B
 				: AUTONOMOUS_EXECUTION_SYSTEM_PROMPT
 
+			// Fix 17: Pre-task directory snapshot
+			const directoryStr = await this._directoryStrService.getAllDirectoriesStr({
+				cutOffMessage: '...Directories cut off, use tools to read more...'
+			})
+			const dirSnapshot = `\n\nCURRENT FILE STRUCTURE:\n${directoryStr.slice(0, 1500)}`
+
 			const preamble = isFirstTask
-				? `${systemPromptToUse}\n\n${workspaceRootMsg}`
-				: `${AUTONOMOUS_CONTINUATION_PROMPT}\n\n${workspaceRootMsg}`
+				? `${systemPromptToUse}\n\n${workspaceRootMsg}${dirSnapshot}`
+				: `${AUTONOMOUS_CONTINUATION_PROMPT}\n\n${workspaceRootMsg}${dirSnapshot}`
 
 			// Execute the task by sending to the chat thread service as a user message
 			try {
 				const threadId = this._chatThreadService.state.currentThreadId
-				
+
 				if (this.state.feedbackAnswer !== null) {
 					const answer = this.state.feedbackAnswer
 					this._setState({ feedbackAnswer: null })
@@ -529,16 +542,67 @@ class AgentPipelineService extends Disposable implements IAgentPipelineService {
 				// Check if the agent asked a question
 				const thread = this._chatThreadService.state.allThreads[threadId]
 				const lastMsg = [...(thread?.messages || [])].reverse().find(m => m.role === 'assistant')
-				if (lastMsg && /AGENT_QUESTION:/i.test(lastMsg.displayContent || '')) {
-					const questionMatch = lastMsg.displayContent!.match(/AGENT_QUESTION:\s*(.*)/i)
-					if (questionMatch) {
-						this._setState({ 
-							phase: 'awaiting_feedback', 
-							pendingQuestion: questionMatch[1].trim(),
-							currentTaskIndex: taskIndex 
-						})
-						this._isPaused = true
-						return // Pause and wait for user to call submitFeedback
+				
+				let questionMatch: RegExpMatchArray | null = null;
+				if (lastMsg?.displayContent) {
+					// Check for XML format <agent_question>...</agent_question>
+					questionMatch = lastMsg.displayContent.match(/<agent_question>\s*([\s\S]*?)\s*<\/agent_question>/i)
+					// Fallback to legacy text format
+					if (!questionMatch) {
+						questionMatch = lastMsg.displayContent.match(/AGENT_QUESTION:\s*(.*)/i)
+					}
+				}
+
+				if (questionMatch) {
+					this._setState({ 
+						phase: 'awaiting_feedback', 
+						pendingQuestion: questionMatch[1].trim(),
+						currentTaskIndex: taskIndex 
+					})
+					this._isPaused = true
+					return // Pause and wait for user to call submitFeedback
+				}
+
+				// Fix 15: Task success / refusal detection
+				const messages = thread?.messages || []
+				const isAgentRefusal = messages.some(m => m.role === 'assistant' && (m.displayContent?.toLowerCase().includes('i cannot') || m.displayContent?.toLowerCase().includes('i am an ai') || m.displayContent?.toLowerCase().includes('as an ai')))
+				const lastTool = [...messages].reverse().find(m => m.role === 'tool') as any
+				const isToolFailure = lastTool && (lastTool.type === 'tool_error' || lastTool.type === 'invalid_params' || lastTool.type === 'rejected')
+
+				if (isToolFailure) {
+					if (lastTool.name === 'run_command') {
+						const sessionState = this._memoryStore.getSessionState()
+						if (sessionState) {
+							sessionState.failedCommands.push({
+								command: (lastTool.params as any)?.command || '',
+								cwd: (lastTool.params as any)?.cwd || '',
+								errorSnippet: lastTool.result?.substring(0, 300) || lastTool.content?.substring(0, 300) || '',
+								exitCode: 1,
+								taskId: task.id,
+								timestamp: Date.now()
+							})
+						}
+					}
+					throw new Error(`Tool failure: ${lastTool.name} -> ${lastTool.result?.substring(0, 300) || lastTool.content?.substring(0, 300)}`)
+				} else if (isAgentRefusal) {
+					throw new Error('Agent refused to execute instructions (detected plain-text refusal).')
+				}
+
+				// Fix 31: Lint enforcement loop
+				if (lastTool && (lastTool.name === 'edit_file' || lastTool.name === 'rewrite_file') && lastTool.type === 'success') {
+					const uriStr = (lastTool.params as any)?.uri;
+					if (uriStr) {
+						let fileUri: URI | undefined
+						try { fileUri = URI.file(uriStr) } catch { /* ignore */ }
+						
+						if (fileUri) {
+							const { result } = await this._toolsService.callTool['read_lint_errors']({ uri: fileUri } as any)
+							const lints = (await result).lintErrors
+							if (lints && lints.length > 0) {
+								const lintMsg = lints.map((e: any) => `Line ${e.startLineNumber}: ${e.message}`).join('\n')
+								throw new Error(`Lint errors introduced in ${uriStr}:\n${lintMsg}\nPlease fix these errors.`)
+							}
+						}
 					}
 				}
 
@@ -617,36 +681,36 @@ class AgentPipelineService extends Disposable implements IAgentPipelineService {
 	 */
 	private _waitForStreamComplete(threadId: string): Promise<void> {
 		return new Promise<void>((resolve) => {
-			// Check if stream is already running right now
-			const currentState = this._chatThreadService.streamState[threadId]
-			let streamStarted = currentState?.isRunning !== undefined
+			let isResolved = false
+			const doResolve = () => {
+				if (isResolved) return
+				isResolved = true
+				resolve()
+			}
 
-			// If stream is not even started yet and not running, give it a moment to start
+			// Check if stream is already idle or not started
+			const currentState = this._chatThreadService.streamState[threadId]
+			if (!currentState || currentState.isRunning === undefined) {
+				doResolve()
+				return
+			}
+
 			const disposable = this._chatThreadService.onDidChangeStreamState(({ threadId: id }) => {
 				if (id !== threadId) return
 				const state = this._chatThreadService.streamState[threadId]
 
-				if (!streamStarted && state?.isRunning !== undefined) {
-					streamStarted = true // stream confirmed started
-					return
-				}
-				if (streamStarted && state?.isRunning === undefined) {
+				if (!state || state.isRunning === undefined) {
 					disposable.dispose()
-					resolve()
+					doResolve()
 				}
 			})
 
-			// Safety: if stream already finished before listener was attached
-			if (streamStarted && currentState?.isRunning === undefined) {
-				disposable.dispose()
-				resolve()
-				return
-			}
-
-			// Timeout fallback: max 5 minutes per task to prevent infinite hang
+			// Timeout fallback: max 5 minutes per task
 			setTimeout(() => {
-				disposable.dispose()
-				resolve()
+				if (!isResolved) {
+					disposable.dispose()
+					doResolve()
+				}
 			}, 5 * 60 * 1000)
 		})
 	}
@@ -661,9 +725,17 @@ class AgentPipelineService extends Disposable implements IAgentPipelineService {
 	): Promise<void> {
 		const affectedTasks = this._getTaskAndDependents(failedTask.id, plan.tasks)
 
+		// Fix 16: Error injection on retry
+		const sessionState = this._memoryStore.getSessionState()
+		let enrichedError = lastError
+		if (sessionState && sessionState.failedCommands.length > 0) {
+			const recentFailures = sessionState.failedCommands.slice(-2).map(f => `Command: ${f.command}\nError: ${f.errorSnippet}`).join('\n\n')
+			enrichedError = `${lastError}\n\nRecent failures:\n${recentFailures}`
+		}
+
 		const result = await this._callLLMForJSON(
 			REPLAN_SYSTEM_PROMPT,
-			buildReplanUserMessage(failedTask, lastError, {}, affectedTasks),
+			buildReplanUserMessage(failedTask, enrichedError, {}, affectedTasks),
 			modelSelection,
 		)
 
@@ -719,19 +791,85 @@ class AgentPipelineService extends Disposable implements IAgentPipelineService {
 	 * The deterministic parser handles all "what" facts (files, packages).
 	 * The async LLM only handles "why" decisions (non-blocking, never delays next task).
 	 */
+	private async _buildRepoMap(workspaceRoot: string): Promise<string> {
+		try {
+			const mapEntries: string[] = []
+			
+			const searchDir = async (dirUri: URI, depth: number) => {
+				if (depth > 4) return // Max depth 4
+				const stat = await this._fileService.resolve(dirUri)
+				if (!stat.children) return
+				
+				for (const child of stat.children) {
+					if (child.isDirectory) {
+						if (!child.name.startsWith('.') && child.name !== 'node_modules' && child.name !== 'dist' && child.name !== 'build') {
+							await searchDir(child.resource, depth + 1)
+						}
+					} else {
+						if (child.name.endsWith('.ts') || child.name.endsWith('.js') || child.name.endsWith('.py')) {
+							try {
+								const content = await this._fileService.readFile(child.resource, { limits: { size: 4096 } })
+								const text = content.value.toString()
+								const lines = text.split('\n')
+								
+								const exports: string[] = []
+								for (let i = 0; i < Math.min(50, lines.length); i++) {
+									const line = lines[i]
+									const match = line.match(/(?:export\s+(?:const|function|class|interface|type|enum)\s+([a-zA-Z0-9_]+))|(?:class\s+([a-zA-Z0-9_]+))/)
+									if (match) {
+										exports.push(match[1] || match[2])
+									}
+								}
+								
+								if (exports.length > 0) {
+									const relPath = child.resource.fsPath.replace(workspaceRoot, '').replace(/^[\\\/]/, '')
+									mapEntries.push(`${relPath} — Exports: ${exports.join(', ')}`)
+								}
+							} catch { /* ignore */ }
+						}
+					}
+				}
+			}
+			
+			await searchDir(URI.file(workspaceRoot), 0)
+			
+			if (mapEntries.length > 0) {
+				return `REPO MAP (Key Files & Exports):\n${mapEntries.slice(0, 20).map(e => `  - ${e}`).join('\n')}`
+			}
+		} catch { /* ignore */ }
+		return ''
+	}
+
 	private async _extractMemory(task: AgentTask, _taskResult: string, threadId: string): Promise<void> {
-		// Step A: Deterministic extraction from tool calls in the agent's messages
 		const thread = this._chatThreadService.state.allThreads[threadId]
-		const recentMessages = thread?.messages?.slice(-12) || []
+		const recentMessages = thread?.messages?.slice(-15) || []
 
-		// Concatenate all assistant output from this task's messages
-		const agentOutputText = recentMessages
-			.filter(m => m.role === 'assistant')
-			.map(m => m.displayContent || '')
-			.join('\n')
+		// Fix 13: Memory extraction via ToolMessage
+		const filesCreated = new Set<string>()
+		const filesModified = new Set<string>()
+		const packagesInstalled = new Set<{ manager: 'npm' | 'pip' | 'cargo' | 'other', name: string }>()
 
-		// This is deterministic — no LLM call, no summarisation errors
-		const outcome = await this._memoryStore.recordTaskOutcome(task, agentOutputText)
+		for (const m of recentMessages) {
+			if (m.role === 'tool' && m.type === 'success' && m.params) {
+				const params = m.params as any
+				if (m.name === 'create_file' && params.uri) filesCreated.add(params.uri)
+				if (m.name === 'edit_file' && params.uri) filesModified.add(params.uri)
+				if (m.name === 'rewrite_file' && params.uri) filesModified.add(params.uri)
+				
+				// Optional: We can add run_command package detection if needed, 
+				// but for now we just handle file paths correctly.
+			}
+		}
+
+		const outcome = await this._memoryStore.recordTaskOutcomeFromParsed(task, {
+			taskId: task.id,
+			title: task.title,
+			status: 'done',
+			filesCreated: Array.from(filesCreated),
+			filesModified: Array.from(filesModified),
+			packagesInstalled: Array.from(packagesInstalled).map(p => ({ ...p, taskId: task.id })),
+			summary: task.title,
+		})
 
 		// Step B: Update the file index in long-term memory
 		const fileUpdates: Record<string, string> = {}

@@ -35,6 +35,7 @@ export interface IMemoryStore {
 	// Session state management (deterministic, per-pipeline)
 	startSession(workspaceRoot: string): Promise<void>
 	recordTaskOutcome(task: AgentTask, agentOutputText: string): Promise<TaskOutcome>
+	recordTaskOutcomeFromParsed(task: AgentTask, outcome: TaskOutcome): Promise<TaskOutcome>
 	getSessionState(): AgentSessionState | null
 	buildSessionContextBlock(): string
 }
@@ -235,6 +236,18 @@ export class MemoryStore extends Disposable implements IMemoryStore {
 			parts.push(`RELEVANT FILES (read before editing):\n${relevantFiles.join('\n')}`)
 		}
 
+		// Cross-session prerequisite knowledge — files that may already exist from previous sessions
+		const prereqs: string[] = []
+		for (const targetFile of taskContext.targetFiles) {
+			const description = memory.fileIndex[targetFile]
+			if (description && !relevantFiles.some(r => r.includes(targetFile))) {
+				prereqs.push(`${targetFile}: ${description} (from previous session)`)
+			}
+		}
+		if (prereqs.length > 0) {
+			parts.push(`FILES FROM PREVIOUS SESSIONS (may already exist — check before creating):\n${prereqs.map(p => `  ${p}`).join('\n')}`)
+		}
+
 		// Past session history — only include if there's no session state already covering it
 		const history = (memory.taskHistory || [])
 			.slice(-3)
@@ -315,6 +328,14 @@ export class MemoryStore extends Disposable implements IMemoryStore {
 
 		const parts: string[] = []
 
+		// CRITICAL: workspace context at the top
+		if (s.workspaceRoot) {
+			parts.push(`WORKSPACE ROOT: ${s.workspaceRoot}`)
+		}
+		if (s.lastKnownCwd && s.lastKnownCwd !== s.workspaceRoot) {
+			parts.push(`LAST USED DIRECTORY: ${s.lastKnownCwd}\n(Use this as cwd for related commands unless you need a different directory)`)
+		}
+
 		// Files already created — IMPERATIVE, not informational
 		if (s.allCreatedFiles.length > 0) {
 			parts.push(
@@ -347,6 +368,13 @@ export class MemoryStore extends Disposable implements IMemoryStore {
 			)
 		}
 
+		// Failed commands — prevent repetition
+		if (s.failedCommands && s.failedCommands.length > 0) {
+			const recent = s.failedCommands.slice(-3)
+			const lines = recent.map(f => `  \u2717 "${f.command}" in ${f.cwd} — ERROR: ${f.errorSnippet}`)
+			parts.push(`COMMANDS THAT FAILED — DO NOT repeat these:\n${lines.join('\n')}`)
+		}
+
 		// Task outcomes (last 5, most recent first)
 		if (s.taskOutcomes.length > 0) {
 			const recent = s.taskOutcomes.slice(-5)
@@ -371,6 +399,34 @@ export class MemoryStore extends Disposable implements IMemoryStore {
 			filesCreated: [], filesModified: [], packagesInstalled: [],
 			summary: task.title,
 		}
+	}
+
+	/**
+	 * Record a task outcome from pre-parsed data (bypasses broken text parser).
+	 * Called from the rewritten _extractMemory in agentPipelineService.
+	 */
+	async recordTaskOutcomeFromParsed(task: AgentTask, outcome: TaskOutcome): Promise<TaskOutcome> {
+		if (!this.sessionState) return outcome
+
+		for (const f of outcome.filesCreated) {
+			if (!this.sessionState.allCreatedFiles.includes(f))
+				this.sessionState.allCreatedFiles.push(f)
+		}
+		for (const f of outcome.filesModified) {
+			if (!this.sessionState.allModifiedFiles.includes(f) &&
+				!this.sessionState.allCreatedFiles.includes(f))
+				this.sessionState.allModifiedFiles.push(f)
+		}
+		for (const pkg of outcome.packagesInstalled) {
+			const exists = this.sessionState.allInstalledPackages
+				.some(p => p.manager === pkg.manager && p.name === pkg.name)
+			if (!exists) this.sessionState.allInstalledPackages.push(pkg)
+		}
+
+		this.sessionState.taskOutcomes.push(outcome)
+		this.sessionState.lastUpdated = Date.now()
+		await this._saveSessionState()
+		return outcome
 	}
 
 	private async _saveSessionState(): Promise<void> {

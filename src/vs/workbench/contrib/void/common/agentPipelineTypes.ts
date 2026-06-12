@@ -5,7 +5,7 @@
 
 // ======================== Agent Task & Plan ========================
 
-export type TaskType = 'create' | 'modify' | 'refactor'
+export type TaskType = 'create' | 'modify' | 'refactor' | 'explore'
 export type TaskStatus = 'pending' | 'running' | 'done' | 'failed'
 
 export interface AgentTask {
@@ -135,6 +135,15 @@ export interface TaskOutcome {
 	errorMessage?: string
 }
 
+export interface FailedCommand {
+	command: string
+	cwd: string
+	exitCode: number
+	errorSnippet: string  // last 200 chars of output
+	taskId: string
+	timestamp: number
+}
+
 export interface AgentSessionState {
 	sessionId: string
 	workspaceRoot: string
@@ -145,6 +154,11 @@ export interface AgentSessionState {
 	allModifiedFiles: string[]
 	allInstalledPackages: InstalledPackage[]
 	taskOutcomes: TaskOutcome[]
+	// CWD tracking
+	lastKnownCwd: string
+	cwdHistory: string[]
+	// Failed command tracking (anti-repetition)
+	failedCommands: FailedCommand[]
 }
 
 export function createEmptySessionState(workspaceRoot: string): AgentSessionState {
@@ -157,6 +171,9 @@ export function createEmptySessionState(workspaceRoot: string): AgentSessionStat
 		allModifiedFiles: [],
 		allInstalledPackages: [],
 		taskOutcomes: [],
+		lastKnownCwd: workspaceRoot,
+		cwdHistory: [workspaceRoot],
+		failedCommands: [],
 	}
 }
 
