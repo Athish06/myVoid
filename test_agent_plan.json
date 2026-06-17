@@ -1,0 +1,50 @@
+{
+  "refinedPrompt": "Build a SystemDiagnostics component deep inside the project to test directory auto-creation, package installation, and automated lint enforcement.",
+  "projectSummary": "This is a medium-sized test plan designed to rigorously stress-test the Void Agent's God-Mode features, including deep path routing, terminal execution, lint-loop repair, and chat history persistence.",
+  "techStack": [
+    "TypeScript",
+    "React",
+    "Tailwind CSS"
+  ],
+  "createdAt": 1718220000000,
+  "lastModified": 1718220000000,
+  "tasks": [
+    {
+      "id": "task_001_install_deps",
+      "title": "Install required dependencies",
+      "description": "Run a terminal command to install `clsx` and `tailwind-merge` which we will use for our diagnostics component. After installing, briefly verify they exist in package.json using <read_file>. Remember to use <think> tags before you execute any tools.",
+      "dependsOn": [],
+      "targetFiles": [
+        "package.json"
+      ],
+      "taskType": "modify",
+      "status": "pending"
+    },
+    {
+      "id": "task_002_create_component",
+      "title": "Create SystemDiagnostics component with an intentional error",
+      "description": "Use <rewrite_file> to create a new file at `src/vs/workbench/contrib/void/browser/react/src/testing-area/deep-folder/SystemDiagnostics.tsx` (this tests auto-directory creation). \n\nInside this file, write a simple React component that renders a stylized card (using tailwind) indicating 'System Online'.\n\nCRITICAL INSTRUCTION: You MUST intentionally introduce a minor TypeScript error in this file (e.g., using a variable that hasn't been declared, or forgetting to import React). This is required to test the pipeline's native lint-enforcement loop. It should throw a lint error after you write it, causing you to automatically replan and fix it.",
+      "dependsOn": [
+        "task_001_install_deps"
+      ],
+      "targetFiles": [
+        "src/vs/workbench/contrib/void/browser/react/src/testing-area/deep-folder/SystemDiagnostics.tsx"
+      ],
+      "taskType": "create",
+      "status": "pending"
+    },
+    {
+      "id": "task_003_fix_lint_error",
+      "title": "Fix the lint error and finalize",
+      "description": "If the previous task successfully triggered a lint error, use <edit_file> to repair the TypeScript error you introduced. Once it compiles cleanly without lint errors, the test is complete. If it didn't trigger an error, just add a console.log statement.",
+      "dependsOn": [
+        "task_002_create_component"
+      ],
+      "targetFiles": [
+        "src/vs/workbench/contrib/void/browser/react/src/testing-area/deep-folder/SystemDiagnostics.tsx"
+      ],
+      "taskType": "modify",
+      "status": "pending"
+    }
+  ]
+}

@@ -1398,7 +1398,7 @@ const AssistantMessageComponent = ({ chatMessage, isCheckpointGhost, isCommitted
 	let hallucinatedThinkStr: string | null = null
 
 	// Extract agent_question
-	const xmlMatch = contentStr.match(/<agent_question>\s*([\s\S]*?)(?:(<\/agent_question>)|$)/i)
+	const xmlMatch = contentStr.match(/(?:<|&lt;)agent_question(?:>|&gt;)\s*([\s\S]*?)(?:(?:<\/|&lt;\/)agent_question(?:>|&gt;)|$)/i)
 	if (xmlMatch) {
 		questionStr = xmlMatch[1].trim()
 		contentStr = contentStr.replace(xmlMatch[0], '')
